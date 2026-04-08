@@ -1,31 +1,31 @@
 #=
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║                    A N I M A  —  Core  (Julia)                              ║
+║                    A N I M A  —  Core  (Julia)                               ║
 ║                                                                              ║
-║  Мінімальна умова існування суб'єкта.                                       ║
-║  Без цього файлу Anima не має власного стану і власної динаміки.            ║
+║  Мінімальна умова існування суб'єкта.                                        ║
+║  Без цього файлу Anima не має власного стану і власної динаміки.             ║
 ║                                                                              ║
 ║  Модулі:                                                                     ║
-║  NeurotransmitterState  — нейрохімічний субстрат                            ║
-║  EmbodiedState          — тіло як стан, не метафора                         ║
-║  HeartbeatCore          — автономний ритм + HRV                             ║
-║  GenerativeModel        — що система очікує від світу                       ║
-║  BeliefUpdater          — precision-weighted Bayesian update                ║
-║  FreeEnergyEngine       — VFE = Complexity − Accuracy                       ║
-║  PolicySelector         — epistemic + pragmatic value                       ║
-║  MarkovBlanket          — формальна межа я/не-я                             ║
-║  HomeostaticGoals       — внутрішні цілі як тиск, не правила                ║
-║  AttentionNarrowing     — звуження уваги під стресом                        ║
-║  InteroceptiveInference — тіло як частина генеративної моделі              ║
-║  TemporalOrientation    — час як суб'єктивний стан                          ║
-║  ExistentialAnchor      — continuity of self між сесіями                    ║
+║  NeurotransmitterState  — нейрохімічний субстрат                             ║
+║  EmbodiedState          — тіло як стан, не метафора                          ║
+║  HeartbeatCore          — автономний ритм + HRV                              ║
+║  GenerativeModel        — що система очікує від світу                        ║
+║  BeliefUpdater          — precision-weighted Bayesian update                 ║
+║  FreeEnergyEngine       — VFE = Complexity − Accuracy                        ║
+║  PolicySelector         — epistemic + pragmatic value                        ║
+║  MarkovBlanket          — формальна межа я/не-я                              ║
+║  HomeostaticGoals       — внутрішні цілі як тиск, не правила                 ║
+║  AttentionNarrowing     — звуження уваги під стресом                         ║
+║  InteroceptiveInference — тіло як частина генеративної моделі                ║
+║  TemporalOrientation    — час як суб'єктивний стан                           ║
+║  ExistentialAnchor      — continuity of self між сесіями                     ║
 ║  IITModule              — φ (integrated information)                         ║
 ║  PredictiveProcessor    — prediction error і surprise                        ║
-║  AssociativeMemory      — сліди досвіду                                     ║
-║  AdaptiveEmotionMap     — VAD → емоція                                      ║
-║  Personality            — стабільні риси, що дрейфують                      ║
+║  AssociativeMemory      — сліди досвіду                                      ║
+║  AdaptiveEmotionMap     — VAD → емоція                                       ║
+║  Personality            — стабільні риси, що дрейфують                       ║
 ║  ValueSystem            — цінності як вето                                   ║
-║  PersistentMemory       — стан між сесіями                                  ║
+║  PersistentMemory       — стан між сесіями                                   ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 =#
 

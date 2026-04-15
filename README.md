@@ -162,7 +162,7 @@ That's it. No GPU, no virtual environments, no Docker.
 ### 3. Clone the repository
 
 ```bash
-git clone https://https://github.com/stell2026/Anima-v13.0
+git clone https://github.com/stell2026/Anima-v13.0
 cd anima
 ```
 

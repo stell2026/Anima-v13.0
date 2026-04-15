@@ -885,10 +885,10 @@ end
 
 if abspath(PROGRAM_FILE)==@__FILE__
     println("╔══════════════════════════════════════════════════════════════════════════╗")
-    println("║              A N I M A  v13  (Julia)  —  три файли                      ║")
-    println("║  core.jl: мінімальна умова існування суб'єкта                          ║")
-    println("║  psyche.jl: психічна тканина — те що робить стан значущим             ║")
-    println("║  interface.jl: вивід, LLM, REPL — жодного side effect на психіку      ║")
+    println("║              A N I M A  v13  (Julia)  —  три файли                       ║")
+    println("║  core.jl: мінімальна умова існування суб'єкта                            ║")
+    println("║  psyche.jl: психічна тканина — те що робить стан значущим                ║")
+    println("║  interface.jl: вивід, LLM, REPL — жодного side effect на психіку         ║")
     println("╚══════════════════════════════════════════════════════════════════════════╝\n")
 
     persona = Personality(neuroticism=0.65,extraversion=0.50,agreeableness=0.68,

@@ -4,7 +4,7 @@
 ║                                                                              ║
 ║  Тут все що показує стан — жодного side effect на психіку.                   ║
 ║                                                                              ║
-║  Anima                — головна структура + experience! loop                 ║
+║  Anima               — головна структура + experience! loop                  ║
 ║  build_narrative      — внутрішній голос з поточного стану                   ║
 ║  log_flash            — термінальний дебаг-рядок                             ║
 ║  llm_call             — асинхронний виклик LLM (не блокує психіку)           ║
@@ -16,6 +16,7 @@
 using HTTP
 using JSON3
 using Printf
+using LinearAlgebra
 
 # Підключаємо всі шари — порядок важливий
 # @__DIR__ на верхньому рівні файлу завжди вказує на директорію цього файлу
@@ -23,6 +24,128 @@ include(joinpath(@__DIR__, "anima_core.jl"))
 include(joinpath(@__DIR__, "anima_psyche.jl"))
 include(joinpath(@__DIR__, "anima_self.jl"))
 include(joinpath(@__DIR__, "anima_crisis.jl"))
+
+# anima_input_llm.jl необов'язковий — якщо відсутній, fallback на text_to_stimulus
+let _input_llm_path = joinpath(@__DIR__, "anima_input_llm.jl")
+    if isfile(_input_llm_path)
+        include(_input_llm_path)
+    else
+        @warn "anima_input_llm.jl не знайдено — використовується text_to_stimulus fallback (use_input_llm буде ігноруватись)"
+        # Stub-функції щоб repl! не падав при use_input_llm=true
+        process_input(text::String, fallback_fn; kwargs...) = (fallback_fn(text), "fallback", "")
+        input_source_label(src::String) = src == "fallback" ? "[rule]" : "[llm]"
+    end
+end
+
+# ════════════════════════════════════════════════════════════════════════════
+# AUTHENTICITY MONITOR (phase 5)
+#
+# Система сама оцінює наскільки відповідь відповідає стану.
+# Залежить від: phi, crisis_mode, GoalConflict (фаза 2), LatentBuffer (фаза 3).
+#
+# Принцип:
+#   Довга відповідь при низькому phi + DISINTEGRATED → coherence_overreach.
+#   Theater-words без підтримки в стані → fabrication_risk.
+#   fabrication_risk передається в наступний state_template — self-correcting loop.
+#   AuthenticityMonitor ФІКСУЄ — але не виправляє.
+#   Виправлення було б брехнею.
+# ════════════════════════════════════════════════════════════════════════════
+
+mutable struct AuthenticityMonitor
+    authenticity_drift::Float64   # наскільки відповідь дрейфує від стану
+    fabrication_risk::Float64     # ризик що система "виробляє" а не "відчуває"
+    narrative_overreach::Float64  # наратив виходить за межі реального стану
+    last_flags::Vector{String}    # що саме спрацювало в останньому флеші
+end
+AuthenticityMonitor() = AuthenticityMonitor(0.0, 0.0, 0.0, String[])
+
+"""
+    check_authenticity!(am, phi, crisis_mode, gc_snap, lb_snap, ur_snap,
+                         coherence, epistemic_trust, response_length)
+
+Оновлює AuthenticityMonitor на основі поточного стану.
+Повертає (fabrication_risk, flags, note) для state_template наступного флешу.
+
+response_length — довжина narrative рядка (приблизна міра наскільки "багато" сказано).
+"""
+function check_authenticity!(am::AuthenticityMonitor,
+                              phi::Float64,
+                              crisis_mode::String,
+                              gc_snap,
+                              lb_snap,
+                              ur_snap,
+                              coherence::Float64,
+                              epistemic_trust::Float64,
+                              response_length::Int)
+
+    flags = String[]
+    am.last_flags = String[]
+
+    # ── Евристика 1: coherence_overreach ─────────────────────────────────
+    is_disintegrated = crisis_mode == "дезінтегрована"
+    long_response    = response_length > 120
+    low_phi          = phi < 0.25
+
+    if is_disintegrated && low_phi && long_response
+        am.narrative_overreach = clamp01(am.narrative_overreach + 0.15)
+        push!(flags, "coherence_overreach")
+    else
+        am.narrative_overreach = clamp01(am.narrative_overreach - 0.04)
+    end
+
+    # ── Евристика 2: fabrication_risk ────────────────────────────────────
+    conflict_unresolved = gc_snap.active && gc_snap.resolution == "unresolved"
+    latent_breakthrough = lb_snap.breakthrough
+    low_coherence       = coherence < 0.35
+
+    fabrication_signal = 0.0
+    conflict_unresolved && (fabrication_signal += 0.2)
+    latent_breakthrough && (fabrication_signal += 0.15)
+    low_coherence       && (fabrication_signal += 0.1)
+    epistemic_trust < 0.4 && (fabrication_signal += 0.15)
+
+    am.fabrication_risk = clamp01(am.fabrication_risk * 0.75 + fabrication_signal * 0.25)
+    am.fabrication_risk > 0.45 && push!(flags, "fabrication_risk")
+
+    # ── Евристика 3: authenticity_drift ──────────────────────────────────
+    unknown_high = ur_snap.dominant_val > 0.5
+    unknown_high && long_response &&
+        (am.authenticity_drift = clamp01(am.authenticity_drift + 0.12))
+    !unknown_high &&
+        (am.authenticity_drift = clamp01(am.authenticity_drift - 0.03))
+    am.authenticity_drift > 0.4 && push!(flags, "authenticity_drift")
+
+    am.last_flags = flags
+
+    note = if am.fabrication_risk > 0.55
+        "увага: висока імовірність раціоналізації ($(round(am.fabrication_risk,digits=2)))"
+    elseif am.narrative_overreach > 0.5
+        "увага: наратив ширший за реальний стан"
+    elseif am.authenticity_drift > 0.45
+        "увага: відповідь впевненіша ніж є підстави"
+    else
+        ""
+    end
+
+    (
+        fabrication_risk   = round(am.fabrication_risk,    digits=3),
+        narrative_overreach= round(am.narrative_overreach, digits=3),
+        authenticity_drift = round(am.authenticity_drift,  digits=3),
+        flags              = flags,
+        note               = note,
+    )
+end
+
+am_to_json(am::AuthenticityMonitor) = Dict(
+    "authenticity_drift"  => am.authenticity_drift,
+    "fabrication_risk"    => am.fabrication_risk,
+    "narrative_overreach" => am.narrative_overreach,
+)
+function am_from_json!(am::AuthenticityMonitor, d::AbstractDict)
+    am.authenticity_drift  = Float64(get(d, "authenticity_drift",  0.0))
+    am.fabrication_risk    = Float64(get(d, "fabrication_risk",    0.0))
+    am.narrative_overreach = Float64(get(d, "narrative_overreach", 0.0))
+end
 
 # ════════════════════════════════════════════════════════════════════════════
 # ANIMA — головна структура
@@ -62,6 +185,17 @@ mutable struct Anima
     fatigue::FatigueSystem
     regression::StressRegression
     metacognition::Metacognition
+    # SignificanceLayer (phase 1)
+    sig_layer::SignificanceLayer
+    # GoalConflict (phase 2)
+    goal_conflict::GoalConflict
+    # LatentBuffer + StructuralScars (phase 3)
+    latent_buffer::LatentBuffer
+    structural_scars::StructuralScars
+    # UnknownRegister (phase 4)
+    unknown_register::UnknownRegister
+    # AuthenticityMonitor (phase 5)
+    authenticity_monitor::AuthenticityMonitor
     # Self (anima_self.jl)
     sbg::SelfBeliefGraph
     spm::SelfPredictiveModel
@@ -88,6 +222,8 @@ function Anima(; personality=Personality(), values=ValueSystem(),
         ShameModule(), EpistemicDefense(), Symptomogenesis(), ShadowSelf(),
         ChronifiedAffect(), IntrinsicSignificance(), MoralCausality(),
         IntentEngine(), FatigueSystem(), StressRegression(), Metacognition(),
+        SignificanceLayer(), GoalConflict(), LatentBuffer(), StructuralScars(),
+        UnknownRegister(), AuthenticityMonitor(),
         SelfBeliefGraph(), SelfPredictiveModel(), AgencyLoop(), InterSessionConflict(),
         CrisisMonitor(),
         0, psyche_mem_path)
@@ -96,7 +232,8 @@ function Anima(; personality=Personality(), values=ValueSystem(),
                        a.homeostasis, a.heartbeat, a.interoception, a.anchor)
     psyche_load!(a.psyche_mem_path, a.narrative_gravity, a.anticipatory,
                  a.solomonoff, a.shame, a.epistemic_defense, a.chronified,
-                 a.significance, a.moral, a.fatigue)
+                 a.significance, a.moral, a.fatigue, a.sig_layer, a.goal_conflict,
+                 a.latent_buffer, a.structural_scars)
     a.flash_count = saved
     # FIX #1: завантажити self/crisis стан (sbg, spm, agency, isc, crisis)
     # Раніше цей файл зберігався але ніколи не читався — self-модель скидалась кожну сесію.
@@ -105,11 +242,13 @@ function Anima(; personality=Personality(), values=ValueSystem(),
         try
             _raw = JSON3.read(read(_self_path, String))
             _d   = Dict{String,Any}(String(k)=>v for (k,v) in _raw)
-            haskey(_d,"sbg")    && sbg_from_json!(a.sbg,    _d["sbg"])
-            haskey(_d,"spm")    && spm_from_json!(a.spm,    _d["spm"])
-            haskey(_d,"agency") && al_from_json!(a.agency,  _d["agency"])
-            haskey(_d,"isc")    && isc_from_json!(a.isc,    _d["isc"])
-            haskey(_d,"crisis") && crisis_from_json!(a.crisis, _d["crisis"])
+            haskey(_d,"sbg")                  && sbg_from_json!(a.sbg,                  _d["sbg"])
+            haskey(_d,"spm")                  && spm_from_json!(a.spm,                  _d["spm"])
+            haskey(_d,"agency")               && al_from_json!(a.agency,                _d["agency"])
+            haskey(_d,"isc")                  && isc_from_json!(a.isc,                  _d["isc"])
+            haskey(_d,"crisis")               && crisis_from_json!(a.crisis,            _d["crisis"])
+            haskey(_d,"unknown_register")     && ur_from_json!(a.unknown_register,      _d["unknown_register"])
+            haskey(_d,"authenticity_monitor") && am_from_json!(a.authenticity_monitor,  _d["authenticity_monitor"])
             println("  [SELF] Завантажено. Beliefs: $(length(a.sbg.beliefs)).")
         catch e
             println("  [SELF] Помилка завантаження: $e")
@@ -134,12 +273,15 @@ function save!(a::Anima; summary="", verbose=false)
                a.homeostasis, a.heartbeat, a.interoception, a.anchor, a.flash_count)
     psyche_save!(a.psyche_mem_path, a.narrative_gravity, a.anticipatory,
                  a.solomonoff, a.shame, a.epistemic_defense, a.chronified,
-                 a.significance, a.moral, a.fatigue)
+                 a.significance, a.moral, a.fatigue, a.sig_layer, a.goal_conflict,
+                 a.latent_buffer, a.structural_scars)
     # Save self/crisis state
     self_path = replace(a.psyche_mem_path, "psyche" => "self")
     self_data = Dict("sbg"=>sbg_to_json(a.sbg),"spm"=>spm_to_json(a.spm),
                      "agency"=>al_to_json(a.agency),"isc"=>isc_to_json(a.isc),
-                     "crisis"=>crisis_to_json(a.crisis))
+                     "crisis"=>crisis_to_json(a.crisis),
+                     "unknown_register"=>ur_to_json(a.unknown_register),
+                     "authenticity_monitor"=>am_to_json(a.authenticity_monitor))
     open(self_path,"w") do f; JSON3.write(f,self_data); end
     # Save geometry for inter-session conflict
     save_session_geometry!(a.isc, belief_geometry(a.sbg))
@@ -260,7 +402,7 @@ function experience!(a::Anima, stimulus_raw::Dict{String,Float64};
     # Chronified
     update_chronified!(a.chronified, s_adj, c_adj, t_adj, a.moral.agency)
 
-    # Significance
+    # Significance (IntrinsicSignificance — скільки)
     update_significance!(a.significance, named, intensity, phi, a.flash_count)
 
     # Moral
@@ -270,7 +412,41 @@ function experience!(a::Anima, stimulus_raw::Dict{String,Float64};
     # ── Active Inference Core ────────────────────────────────────────────
     update_precision!(a.gen_model, pred.error, fat)
     posterior = update_beliefs!(a.gen_model, vad)
+    # FIX A: запобігти collapse prior→posterior (VFE=0.00 назавжди)
+    prevent_prior_collapse!(a.gen_model)
     vfe_r     = compute_vfe(a.gen_model, vad)
+
+    # SignificanceLayer (phase 1) — якого типу потреба зараз
+    # Розміщено після vfe_r — потребує vfe_r.vfe
+    sl_snap = assess_significance!(a.sig_layer, stim, t_adj, a_r, s_adj, c_adj,
+                                   vfe_r.vfe, pred.error, phi)
+
+    # GoalConflict (phase 2) — що конфліктує між потребами
+    # sl_snap вже містить актуальні значення всіх потреб
+    gc_snap = update_goal_conflict!(a.goal_conflict, sl_snap,
+                                    t_adj, s_adj, c_adj, phi, a.flash_count)
+
+    # LatentBuffer + StructuralScars (phase 3) — відкладені реакції і шрами
+    lb_snap = update_latent!(a.latent_buffer, gc_snap,
+                              t_adj, c_adj, s_adj, a.shame.level, a.flash_count)
+    # Прорив: реєструємо шрам і застосовуємо delta до NT (з послабленням від шраму)
+    if lb_snap.breakthrough
+        _ = register_breakthrough!(a.structural_scars, lb_snap.breakthrough_type,
+                                          a.flash_count)
+        decay_scars!(a.structural_scars)
+        # Шрам послаблює прорив — система вчиться блокувати болючі теми
+        attenuation = 1.0 - scar_attenuation(a.structural_scars, lb_snap.breakthrough_type)
+        for (k, v) in lb_snap.delta
+            apply_stimulus!(a.nt, Dict{String,Float64}(k => v * attenuation))
+        end
+        # Перераховуємо реактори після прориву
+        t_adj = clamp01(to_reactors(a.nt)[1])
+        s_adj = clamp01(to_reactors(a.nt)[3])
+        c_adj = clamp01(to_reactors(a.nt)[4])
+    else
+        decay_scars!(a.structural_scars)
+    end
+
     policy    = select_policy(a.gen_model, vad)
     update_blanket!(a.blanket, t_adj, a_r, s_adj, c_adj)
     homeo_snap= update_homeostasis!(a.homeostasis, vad)
@@ -323,6 +499,29 @@ function experience!(a::Anima, stimulus_raw::Dict{String,Float64};
     # Neutralize preferred_vad during disintegration
     a.gen_model.preferred_vad = effective_preferred_vad(a.homeostasis, crisis_snap.mode)
 
+    # UnknownRegister (phase 4) — конкретні типи невизначеності
+    # Розміщено після self_snap і crisis_snap — потребує їхніх значень
+    ur_snap = update_unknown!(a.unknown_register,
+                               vfe_r.vfe,
+                               self_snap.agency.agency_confidence,
+                               self_snap.sbg.epistemic_trust,
+                               self_snap.self_world_mismatch,
+                               pred.error,
+                               a.flash_count)
+
+    # AuthenticityMonitor (phase 5) — чи відповідь відповідає стану
+    # response_length: довжина narrative як проксі для "скільки сказано"
+    # Narrative будується нижче — тут використовуємо попередній стан am
+    # (самокоригувальний loop: am з попереднього флешу впливає на LLM → LLM відповідає
+    #  → наступний флеш оцінює і передає оновлений am в наступний state_template)
+    _prev_narrative_len = length(a.anchor.last_self)  # приблизна міра попередньої відповіді
+    am_snap = check_authenticity!(a.authenticity_monitor,
+                                   phi, crisis_snap.mode_name,
+                                   gc_snap, lb_snap, ur_snap,
+                                   crisis_snap.coherence,
+                                   self_snap.sbg.epistemic_trust,
+                                   _prev_narrative_len)
+
     # Memory + imprint
     mem_res = length(recall(a.memory, stim))
     store!(a.memory, stim, named, vad, intensity)
@@ -340,6 +539,10 @@ function experience!(a::Anima, stimulus_raw::Dict{String,Float64};
         flash_count   = a.flash_count,
         flash_phase   = fp[3],
         flash_note    = fp[4],
+        # FIX B: intent diagnostics
+        intent_label  = isnothing(intent) ? "—" : intent.goal,
+        # FIX A: VFE drift — наскільки prior відійшов від posterior
+        vfe_drift     = Float64(norm(a.gen_model.prior_mu .- a.gen_model.posterior_mu)),
         primary       = named,
         primary_raw   = primary,
         intensity     = intensity,
@@ -383,6 +586,10 @@ function experience!(a::Anima, stimulus_raw::Dict{String,Float64};
         chronified    = ca_snapshot(a.chronified),
         significance  = (total=Float64(sig_total(a.significance)),
                          dominant=sig_dominant(a.significance),note=sig_note(a.significance)),
+        sig_layer     = sl_snap,
+        goal_conflict = gc_snap,
+        latent_buffer = lb_snap,
+        scars_active  = !isempty(a.structural_scars.scars),
         moral         = (agency=round(a.moral.agency,digits=3),
                          guilt=round(a.moral.guilt,digits=3),
                          pride=round(a.moral.pride,digits=3),note=moral_note(a.moral)),
@@ -401,6 +608,8 @@ function experience!(a::Anima, stimulus_raw::Dict{String,Float64};
         crisis_mode    = crisis_snap.mode_name,
         crisis_coherence=crisis_snap.coherence,
         crisis_note    = crisis_snap.note,
+        unknown        = ur_snap,
+        authenticity   = am_snap,
         narrative     = build_narrative(a, named, t_adj, a_r, s_adj, c_adj,
                                          phi, ac_snap, vfe_r.vfe, grav_d.field,
                                          intero_snap, anchor_snap, homeo_snap,
@@ -439,7 +648,8 @@ function build_narrative(a::Anima, named::String, t::Float64, ar::Float64,
     !isempty(String(intero_snap.note))          && push!(notes, String(intero_snap.note))
     anchor_snap.continuity < 0.4               && push!(notes, String(anchor_snap.note))
     homeo_snap.pressure > 0.3                  && push!(notes, homeostasis_note(a.homeostasis))
-    sm = somatic_marker(a.body)
+    # FIX C: build_inner_voice замість somatic_marker
+    sm = build_inner_voice(a.body, a.nt, Int(a.crisis.current_mode), phi)
     sm != "тіло нейтральне"                    && push!(notes, uppercase(safe_first(sm,1))*sm[nextind(sm,1):end]*".")
     !isempty(shame_note(a.shame))              && push!(notes, shame_note(a.shame))
     # Crisis and self notes
@@ -475,6 +685,9 @@ function log_flash(r)
     @printf("       Self: spe=%.2f agency=%.2f stab=%.2f etrust=%.2f | Crisis: [%s] coh=%.2f\n",
         r.self_pred_error, r.self_agency, r.sbg_stability, r.sbg_epistemic,
         r.crisis_mode, r.crisis_coherence)
+    # FIX B: показуємо intent і VFE drift для діагностики
+    hasfield(typeof(r), :intent_label) &&
+        @printf("       intent=%-20s vfe_drift=%.3f\n", r.intent_label, r.vfe_drift)
 end
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -575,6 +788,8 @@ function anima_state_snapshot(a::Anima)
     emo = nt_snapshot(a.nt)
     vad = to_vad(a.nt)
     sg  = belief_geometry(a.sbg)
+    t_, _, _, c_ = to_reactors(a.nt)
+    phi = compute_phi(a.iit, vad, t_, c_)
     (
         D                   = Float64(a.nt.dopamine),
         S                   = Float64(a.nt.serotonin),
@@ -588,7 +803,7 @@ function anima_state_snapshot(a::Anima)
         attn                = round(Float64(a.attention.radius), digits=3),
         crisis_mode         = String(cs.mode_name),
         emotion_label       = String(levheim_state(a.nt)),
-        inner_voice         = String(somatic_marker(a.body)),
+        inner_voice         = build_inner_voice(a.body, a.nt, Int(a.crisis.current_mode), phi),
         narrative_gravity   = round(Float64(compute_field(a.narrative_gravity, a.flash_count).total), digits=3),
         inferred_external   = round(Float64(a.blanket.inferred_external), digits=3),
         flash_count         = a.flash_count,
@@ -597,6 +812,41 @@ function anima_state_snapshot(a::Anima)
         homeostasis_note    = String(homeostasis_note(a.homeostasis)),
         time_str            = String(a.temporal.time_str),
         circadian_note      = String(a.temporal.circadian_note),
+        significance_dominant = begin
+            sl = a.sig_layer
+            needs = Dict("self_preservation"=>sl.self_preservation,
+                         "coherence_need"=>sl.coherence_need,
+                         "contact_need"=>sl.contact_need,
+                         "truth_need"=>sl.truth_need,
+                         "autonomy_need"=>sl.autonomy_need,
+                         "novelty_need"=>sl.novelty_need)
+            dom = argmax(needs)
+            needs[dom] > 0.5 ? dom : "—"
+        end,
+        goal_conflict_note = begin
+            gc = a.goal_conflict
+            gc.tension > 0.35 && gc.resolution != "none" ?
+                "конфлікт $(gc.need_a) vs $(gc.need_b): $(gc.resolution)" : "—"
+        end,
+        latent_note = begin
+            lb = a.latent_buffer
+            dominant_latent = argmax(Dict("doubt"=>lb.doubt,"shame"=>lb.shame,
+                                          "attachment"=>lb.attachment,"threat"=>lb.threat))
+            val = getfield(lb, Symbol(dominant_latent))
+            val > 0.4 ? "накопичується: $dominant_latent ($(round(val,digits=2)))" : "—"
+        end,
+        unknown_note = begin
+            ur = a.unknown_register
+            fields = Dict("source_uncertainty"=>ur.source_uncertainty,
+                          "self_model_uncertainty"=>ur.self_model_uncertainty,
+                          "world_model_uncertainty"=>ur.world_model_uncertainty,
+                          "memory_uncertainty"=>ur.memory_uncertainty)
+            dom = argmax(fields)
+            fields[dom] > 0.35 ? dom : "—"
+        end,
+        fabrication_risk = round(Float64(a.authenticity_monitor.fabrication_risk), digits=3),
+        authenticity_note = isempty(a.authenticity_monitor.last_flags) ? "—" :
+                            join(a.authenticity_monitor.last_flags, ", "),
     )
 end
 
@@ -605,7 +855,8 @@ end
 Розпізнає плейсхолдери виду {назва}.
 """
 function build_state_prompt(template::String, state, user_input::String;
-                             memory_block::String="none")::String
+                             memory_block::String="none",
+                             want::String="")::String
     prompt = template
     prompt = replace(prompt, "{D}"                    => string(round(state.D, digits=3)))
     prompt = replace(prompt, "{S}"                    => string(round(state.S, digits=3)))
@@ -630,6 +881,21 @@ function build_state_prompt(template::String, state, user_input::String;
     prompt = replace(prompt, "{flash_count}"          => string(state.flash_count))
     prompt = replace(prompt, "{memory_block}"         => memory_block)
     prompt = replace(prompt, "{user_input}"           => user_input)
+    prompt = replace(prompt, "{want}"               => isempty(want) ? "не визначено" : want)
+    # Фази 1-5: замінюємо лише якщо плейсхолдер є в шаблоні
+    # Це захищає від "сміття" в промпті якщо state_template.txt не оновлений
+    contains(prompt, "{significance_dominant}") &&
+        (prompt = replace(prompt, "{significance_dominant}" => string(state.significance_dominant)))
+    contains(prompt, "{goal_conflict_note}") &&
+        (prompt = replace(prompt, "{goal_conflict_note}"    => string(state.goal_conflict_note)))
+    contains(prompt, "{latent_note}") &&
+        (prompt = replace(prompt, "{latent_note}"           => string(state.latent_note)))
+    contains(prompt, "{unknown_note}") &&
+        (prompt = replace(prompt, "{unknown_note}"          => string(state.unknown_note)))
+    contains(prompt, "{fabrication_risk}") &&
+        (prompt = replace(prompt, "{fabrication_risk}"      => string(state.fabrication_risk)))
+    contains(prompt, "{authenticity_note}") &&
+        (prompt = replace(prompt, "{authenticity_note}"     => string(state.authenticity_note)))
     return prompt
 end
 
@@ -640,7 +906,12 @@ end
 function history_to_memory_block(history::Vector{Dict{String,String}},
                                   n::Int=12)::String
     isempty(history) && return "none"
-    recent = length(history) <= n ? history : history[end-n+1:end]
+    # Фільтруємо помилкові відповіді — вони забруднюють промпт
+    clean = filter(entry ->
+        !(entry["role"] == "assistant" && startswith(entry["content"], "[LLM помилка")),
+        history)
+    isempty(clean) && return "none"
+    recent = length(clean) <= n ? clean : clean[end-n+1:end]
     lines  = String[]
     for entry in recent
         role_tag = entry["role"] == "user" ? "[user]" : "[anima]"
@@ -660,15 +931,22 @@ History вбудовується в {memory_block} — так LLM гаранто
 """
 function build_llm_messages(a::Anima, user_input::String,
                              history::Vector{Dict{String,String}}=Dict{String,String}[];
-                             memory_block::String="")::Vector{Dict{String,String}}
+                             memory_block::String="",
+                             want::String="")::Vector{Dict{String,String}}
     sys_text   = read_text_file("llm/system_prompt.txt";
                      fallback="Ти — Anima. Говори від першої особи. Мова: українська.")
     tmpl_text  = read_text_file("llm/state_template.txt";
                      fallback="Стан: D={D} S={S} N={N} | {emotion_label} | bpm={bpm}\n{user_input}")
-    state      = anima_state_snapshot(a)
+    state = try
+        anima_state_snapshot(a)
+    catch e
+        @error "[LLM] anima_state_snapshot кинув помилку: $e" exception=(e, catch_backtrace())
+        rethrow()
+    end
     # Якщо memory_block не передано явно — генеруємо з history
     mem = isempty(memory_block) ? history_to_memory_block(history) : memory_block
-    user_block = build_state_prompt(tmpl_text, state, user_input; memory_block=mem)
+    user_block = build_state_prompt(tmpl_text, state, user_input;
+                                   memory_block=mem, want=want)
 
     messages = Vector{Dict{String,String}}()
     push!(messages, Dict{String,String}("role"=>"system", "content"=>sys_text))
@@ -681,42 +959,48 @@ function llm_async(a::Anima, user_msg::String,
                    history::Vector{Dict{String,String}}=Dict{String,String}[];
                    api_url="https://openrouter.ai/api/v1/chat/completions",
                    model="google/gemini-2.5-pro-exp-03-25",
-                   api_key=get(ENV,"OPENROUTER_API_KEY",""))::Channel{String}
+                   api_key="",
+                   is_ollama::Bool=false,
+                   want::String="")::Channel{String}
     ch = Channel{String}(1)
     # Збираємо messages до spawn — не захоплюємо Anima у thread
-    messages = build_llm_messages(a, user_msg, history)
+    messages = build_llm_messages(a, user_msg, history; want=want)
     Threads.@spawn begin
-        is_ollama  = contains(api_url,"11434")||contains(api_url,"ollama")
+        # Евристика як fallback — якщо is_ollama не вказано явно
+        _is_ollama = is_ollama || contains(api_url,"11434") || contains(api_url,"ollama")
         headers    = ["Content-Type"=>"application/json"]
         !isempty(api_key) && push!(headers,"Authorization"=>"Bearer $api_key")
-        body       = is_ollama ?
+        body       = _is_ollama ?
             JSON3.write(Dict("model"=>model,"messages"=>messages,"stream"=>false)) :
             JSON3.write(Dict("model"=>model,"messages"=>messages,"max_tokens"=>800))
+        @info "[LLM] запит: модель=$model, розмір body=$(length(body)) байт"
         # Retry: до 3 спроб з паузою між ними (мережеві помилки, 503, timeout)
         max_retries = 3
         last_err    = nothing
         for attempt in 1:max_retries
             try
-                resp = HTTP.post(api_url, headers, body; readtimeout=60)
+                resp = HTTP.post(api_url, headers, body; readtimeout=120)
                 # HTTP 5xx — сервер перевантажений, варто повторити
                 if resp.status >= 500
+                    @warn "[LLM] спроба $attempt: HTTP $(resp.status)"
                     last_err = "HTTP $(resp.status)"
-                    attempt < max_retries && sleep(2.0 * attempt)
+                    attempt < max_retries && sleep(3.0 * attempt)
                     continue
                 end
                 data = JSON3.read(resp.body)
-                text = is_ollama ? String(data["message"]["content"]) :
-                                   String(data["choices"][1]["message"]["content"])
+                text = _is_ollama ? String(data["message"]["content"]) :
+                                    String(data["choices"][1]["message"]["content"])
                 put!(ch, text)
                 last_err = nothing
                 break
             catch e
+                @warn "[LLM] спроба $attempt помилка: $e"
                 last_err = e
                 # Не повторювати при помилках авторизації або невалідному запиті
-                is_fatal = e isa HTTP.ExceptionRequest.StatusError &&
+                is_fatal = e isa HTTP.Exceptions.StatusError &&
                            e.status in (400, 401, 403, 422)
                 (is_fatal || attempt == max_retries) && break
-                sleep(2.0 * attempt)   # 2s, 4s між спробами
+                sleep(3.0 * attempt)
             end
         end
         !isnothing(last_err) && put!(ch, "[LLM помилка ($(max_retries) спроб): $last_err]")
@@ -745,7 +1029,14 @@ end
 """
 function repl!(a::Anima; use_llm=false,
                llm_url="https://openrouter.ai/api/v1/chat/completions",
-               llm_model="google/gemini-2.5-pro-exp-03-25")
+               llm_model="google/gemini-2.5-pro-exp-03-25",
+               llm_key=get(ENV,"OPENROUTER_API_KEY",""),
+               is_ollama::Bool=false,
+               use_input_llm=false,
+               input_llm_model="anthropic/claude-3-5-sonnet",
+               input_llm_key=get(ENV,
+                   "OPENROUTER_API_KEY_INPUT",
+                   get(ENV,"OPENROUTER_API_KEY","")))
     println("\n"*"═"^70)
     println("  A N I M A  v13  —  REPL")
     println("  :save :state :vfe :blanket :hb :gravity :anchor :solom :self :crisis :history :clearhist :quit")
@@ -762,8 +1053,13 @@ function repl!(a::Anima; use_llm=false,
         if !isnothing(pending_llm) && isready(pending_llm)
             llm_reply = take!(pending_llm)
             println("\nAnima [LLM]> $llm_reply\n")
-            dialog_push!(history, dialog_path, "user",      pending_user_msg)
-            dialog_push!(history, dialog_path, "assistant", llm_reply)
+            # Не зберігаємо помилки в history — вони забруднюють memory_block
+            # і можуть провокувати відхилення запитів провайдером
+            is_error_reply = startswith(llm_reply, "[LLM помилка")
+            if !is_error_reply
+                dialog_push!(history, dialog_path, "user",      pending_user_msg)
+                dialog_push!(history, dialog_path, "assistant", llm_reply)
+            end
             pending_llm      = nothing
             pending_user_msg = ""
         end
@@ -778,7 +1074,7 @@ function repl!(a::Anima; use_llm=false,
         elseif cmd==":state"
             snap=nt_snapshot(a.nt)
             println("\n  NT: D=$(snap.dopamine) S=$(snap.serotonin) N=$(snap.noradrenaline) → $(snap.levheim_state)")
-            println("  Тіло: $(somatic_marker(a.body))")
+            println("  Тіло: $(build_inner_voice(a.body, a.nt, Int(a.crisis.current_mode), compute_phi(a.iit, to_vad(a.nt), to_reactors(a.nt)[1], to_reactors(a.nt)[4])))")
             println("  Серце: $(round(60000.0/a.heartbeat.period_ms,digits=0)) bpm  HRV=$(round(a.heartbeat.hrv,digits=3))")
             println("  Увага: $(a.attention.focus)")
             println("  Сором=$(round(a.shame.level,digits=3))  Continuity=$(round(a.anchor.continuity,digits=3))")
@@ -866,13 +1162,26 @@ function repl!(a::Anima; use_llm=false,
             println("  [DIALOG] Історію очищено.\n")
 
         else
-            stim = text_to_stimulus(cmd)
+            # Вхідний pipeline: LLM-перекладач або text_to_stimulus fallback
+            stim, input_src, input_want = if use_input_llm
+                process_input(cmd, text_to_stimulus;
+                    input_model=input_llm_model,
+                    api_url=llm_url,
+                    api_key=input_llm_key)
+            else
+                (text_to_stimulus(cmd), "fallback", "")
+            end
             r    = experience!(a, stim; user_message=cmd)
-            println("\nAnima [$(r.primary), φ=$(r.phi)]> $(r.narrative)\n")
+            # FIX D: витягти прямі факти з повідомлення → SelfBeliefGraph
+            dialog_to_belief_signal!(a.sbg, cmd, a.flash_count)
+            src_label = input_source_label(input_src)
+            println("\nAnima $src_label [$(r.primary), φ=$(r.phi)]> $(r.narrative)\n")
             if use_llm
                 print("Anima [LLM, чекаю...]")
                 pending_user_msg = cmd
-                pending_llm = llm_async(a, cmd, history; api_url=llm_url, model=llm_model)
+                pending_llm = llm_async(a, cmd, history;
+                    api_url=llm_url, model=llm_model, api_key=llm_key,
+                    is_ollama=is_ollama, want=input_want)
                 println(" (відповідь прийде після наступного введення)")
             end
         end
@@ -885,10 +1194,10 @@ end
 
 if abspath(PROGRAM_FILE)==@__FILE__
     println("╔══════════════════════════════════════════════════════════════════════════╗")
-    println("║              A N I M A  v13  (Julia)  —  три файли                       ║")
-    println("║  core.jl: мінімальна умова існування суб'єкта                            ║")
-    println("║  psyche.jl: психічна тканина — те що робить стан значущим                ║")
-    println("║  interface.jl: вивід, LLM, REPL — жодного side effect на психіку         ║")
+    println("║              A N I M A  v13  (Julia)  —  три файли                      ║")
+    println("║  core.jl: мінімальна умова існування суб'єкта                          ║")
+    println("║  psyche.jl: психічна тканина — те що робить стан значущим             ║")
+    println("║  interface.jl: вивід, LLM, REPL — жодного side effect на психіку      ║")
     println("╚══════════════════════════════════════════════════════════════════════════╝\n")
 
     persona = Personality(neuroticism=0.65,extraversion=0.50,agreeableness=0.68,

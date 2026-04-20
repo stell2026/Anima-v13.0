@@ -510,6 +510,540 @@ function mc_from_json!(mc::MoralCausality, d::AbstractDict)
 end
 
 # ════════════════════════════════════════════════════════════════════════════
+# SIGNIFICANCE LAYER — що саме поставлено на карту цього флешу
+#
+# Відрізняється від IntrinsicSignificance:
+#   IntrinsicSignificance — скільки значущості (градієнт, сума)
+#   SignificanceLayer     — якого типу потреба зараз активована
+#
+# Кожна потреба має незалежну динаміку:
+#   - зростає через конкретні тригери в стимулі
+#   - повільно decay до базового рівня
+#   - dominant_need — та що найвища прямо зараз
+# ════════════════════════════════════════════════════════════════════════════
+
+mutable struct SignificanceLayer
+    self_preservation::Float64   # загроза цілісності системи
+    coherence_need::Float64      # потреба у внутрішньому порядку
+    contact_need::Float64        # потреба у зв'язку з іншим
+    truth_need::Float64          # потреба у правдивості / точності
+    autonomy_need::Float64       # потреба не бути керованою
+    novelty_need::Float64        # потреба у новизні / невизначеності
+end
+SignificanceLayer() = SignificanceLayer(0.2, 0.3, 0.3, 0.4, 0.3, 0.2)
+
+"""
+    assess_significance!(sl, stim, tension, arousal, satisfaction, cohesion, vfe, pred_error, phi)
+
+Оновлює SignificanceLayer на основі поточного стимулу і стану реакторів.
+Повертає (dominant_need, dominant_val, note) — що саме поставлено на карту.
+"""
+function assess_significance!(sl::SignificanceLayer,
+                               stim::Dict{String,Float64},
+                               tension::Float64, arousal::Float64,
+                               satisfaction::Float64, cohesion::Float64,
+                               vfe::Float64, pred_error::Float64,
+                               phi::Float64)
+
+    # ── Тригери росту потреб ──────────────────────────────────────────────
+
+    # self_preservation: загроза цілісності → висока напруга + низький cohesion
+    threat = clamp01(tension * 0.6 + (1.0 - cohesion) * 0.3 + pred_error * 0.1)
+    threat > 0.4 &&
+        (sl.self_preservation = clamp01(sl.self_preservation + threat * 0.12))
+
+    # coherence_need: висока VFE = система не розуміє світу → треба порядок
+    vfe > 0.4 &&
+        (sl.coherence_need = clamp01(sl.coherence_need + (vfe - 0.4) * 0.15))
+
+    # contact_need: низька cohesion без загрози = самотність, не небезпека
+    contact_signal = cohesion < 0.35 && tension < 0.5
+    contact_signal &&
+        (sl.contact_need = clamp01(sl.contact_need + (0.35 - cohesion) * 0.2))
+    # позитивний cohesion-стимул також підживлює
+    get(stim, "cohesion", 0.0) > 0.1 &&
+        (sl.contact_need = clamp01(sl.contact_need + get(stim,"cohesion",0.0) * 0.1))
+
+    # truth_need: pred_error + phi = система вловлює невідповідність
+    truth_signal = pred_error > 0.3 && phi > 0.2
+    truth_signal &&
+        (sl.truth_need = clamp01(sl.truth_need + pred_error * 0.1 + phi * 0.05))
+
+    # autonomy_need: висока tension + низький arousal = притиснута без виходу
+    autonomy_signal = tension > 0.5 && arousal < 0.4
+    autonomy_signal &&
+        (sl.autonomy_need = clamp01(sl.autonomy_need + tension * 0.08))
+
+    # novelty_need: низький pred_error довго = система нудьгує
+    pred_error < 0.1 && arousal < 0.3 &&
+        (sl.novelty_need = clamp01(sl.novelty_need + 0.04))
+    # несподіване (pred_error spike) спочатку гасить новизну — є чим зайнятись
+    pred_error > 0.6 &&
+        (sl.novelty_need = clamp01(sl.novelty_need - 0.06))
+
+    # ── Decay до базового рівня (повільно) ───────────────────────────────
+    base = (self_preservation=0.2, coherence_need=0.3, contact_need=0.3,
+            truth_need=0.4, autonomy_need=0.3, novelty_need=0.2)
+    decay = 0.015
+    sl.self_preservation = clamp01(sl.self_preservation + (base.self_preservation - sl.self_preservation) * decay)
+    sl.coherence_need    = clamp01(sl.coherence_need    + (base.coherence_need    - sl.coherence_need)    * decay)
+    sl.contact_need      = clamp01(sl.contact_need      + (base.contact_need      - sl.contact_need)      * decay)
+    sl.truth_need        = clamp01(sl.truth_need        + (base.truth_need        - sl.truth_need)        * decay)
+    sl.autonomy_need     = clamp01(sl.autonomy_need     + (base.autonomy_need     - sl.autonomy_need)     * decay)
+    sl.novelty_need      = clamp01(sl.novelty_need      + (base.novelty_need      - sl.novelty_need)      * decay)
+
+    # ── Dominant need ─────────────────────────────────────────────────────
+    needs = Dict(
+        "self_preservation" => sl.self_preservation,
+        "coherence_need"    => sl.coherence_need,
+        "contact_need"      => sl.contact_need,
+        "truth_need"        => sl.truth_need,
+        "autonomy_need"     => sl.autonomy_need,
+        "novelty_need"      => sl.novelty_need,
+    )
+    dominant = argmax(needs)
+    dominant_val = needs[dominant]
+
+    # ── Пояснення для state_template ─────────────────────────────────────
+    NEED_NOTES = Dict(
+        "self_preservation" => "поставлено на карту: цілісність",
+        "coherence_need"    => "поставлено на карту: внутрішній порядок",
+        "contact_need"      => "поставлено на карту: зв'язок",
+        "truth_need"        => "поставлено на карту: правда",
+        "autonomy_need"     => "поставлено на карту: автономія",
+        "novelty_need"      => "поставлено на карту: новизна",
+    )
+    note = dominant_val > 0.5 ? get(NEED_NOTES, dominant, "") : ""
+
+    (dominant=dominant, dominant_val=round(dominant_val, digits=3), note=note,
+     self_preservation=round(sl.self_preservation, digits=3),
+     coherence_need=round(sl.coherence_need, digits=3),
+     contact_need=round(sl.contact_need, digits=3),
+     truth_need=round(sl.truth_need, digits=3),
+     autonomy_need=round(sl.autonomy_need, digits=3),
+     novelty_need=round(sl.novelty_need, digits=3))
+end
+
+sl_to_json(sl::SignificanceLayer) = Dict(
+    "self_preservation" => sl.self_preservation,
+    "coherence_need"    => sl.coherence_need,
+    "contact_need"      => sl.contact_need,
+    "truth_need"        => sl.truth_need,
+    "autonomy_need"     => sl.autonomy_need,
+    "novelty_need"      => sl.novelty_need,
+)
+function sl_from_json!(sl::SignificanceLayer, d::AbstractDict)
+    sl.self_preservation = Float64(get(d, "self_preservation", 0.2))
+    sl.coherence_need    = Float64(get(d, "coherence_need",    0.3))
+    sl.contact_need      = Float64(get(d, "contact_need",      0.3))
+    sl.truth_need        = Float64(get(d, "truth_need",        0.4))
+    sl.autonomy_need     = Float64(get(d, "autonomy_need",     0.3))
+    sl.novelty_need      = Float64(get(d, "novelty_need",      0.2))
+end
+
+# ════════════════════════════════════════════════════════════════════════════
+# GOAL CONFLICT — система розв'язує внутрішній конфлікт між потребами
+#
+# Залежить від SignificanceLayer (фаза 1) — потребує знати які потреби активні.
+#
+# Концепція:
+#   Не "є напруга" — а "contact_need тягне вправо, truth_need тягне вліво".
+#   Конфлікт передається в state_template: LLM говорить з нього, не про нього.
+#   Пасивна агресія, раціоналізація, дивні висновки — органічний наслідок,
+#   коли вхідна LLM бачить "дружній" запит а ядро видає напружений стан.
+#
+# resolution:
+#   "truth_won"    — truth_need перемогла (система обирає чесність)
+#   "contact_won"  — contact_need перемогла (система обирає зв'язок)
+#   "autonomy_won" — autonomy_need перемогла
+#   "unresolved"   — конфлікт не вирішений, tension залишається
+#   "none"         — конфлікту немає
+# ════════════════════════════════════════════════════════════════════════════
+
+mutable struct GoalConflict
+    need_a::String               # перша конкуруюча потреба
+    need_b::String               # друга конкуруюча потреба
+    tension::Float64             # інтенсивність конфлікту (0..1)
+    resolution::String           # результат: "truth_won" / "contact_won" / ... / "unresolved" / "none"
+    unresolved_count::Int        # скільки флешів поспіль конфлікт не вирішено
+    last_flash::Int              # флеш останнього активного конфлікту
+end
+GoalConflict() = GoalConflict("", "", 0.0, "none", 0, 0)
+
+# Пари потреб що типово конфліктують — (need_a, need_b, опис конфлікту)
+const CONFLICT_PAIRS = [
+    ("contact_need",   "truth_need",        "хтось хоче приємного, але правда неприємна"),
+    ("autonomy_need",  "contact_need",      "зв'язок потребує поступки, автономія опирається"),
+    ("self_preservation","truth_need",      "правда загрожує цілісності"),
+    ("coherence_need", "novelty_need",      "новизна руйнує порядок"),
+    ("contact_need",   "self_preservation", "зближення загрожує межам"),
+]
+
+"""
+    update_goal_conflict!(gc, sl_snap, tension, satisfaction, cohesion, phi, flash)
+
+Оновлює GoalConflict на основі поточного SignificanceLayer snapshot.
+Повертає NamedTuple з описом конфлікту для state_template.
+"""
+function update_goal_conflict!(gc::GoalConflict,
+                                sl_snap,
+                                tension::Float64,
+                                satisfaction::Float64,
+                                cohesion::Float64,
+                                phi::Float64,
+                                flash::Int)
+
+    # ── Знайти найгостріший активний конфлікт ────────────────────────────
+    best_pair  = nothing
+    best_score = 0.0
+
+    needs = Dict(
+        "self_preservation" => sl_snap.self_preservation,
+        "coherence_need"    => sl_snap.coherence_need,
+        "contact_need"      => sl_snap.contact_need,
+        "truth_need"        => sl_snap.truth_need,
+        "autonomy_need"     => sl_snap.autonomy_need,
+        "novelty_need"      => sl_snap.novelty_need,
+    )
+
+    for (na, nb, _desc) in CONFLICT_PAIRS
+        va = get(needs, na, 0.0)
+        vb = get(needs, nb, 0.0)
+        # Конфлікт виникає коли обидві потреби одночасно вищі за поріг
+        both_active = va > 0.38 && vb > 0.38
+        !both_active && continue
+        # Гострота = добуток (обидві мають бути сильними) + зовнішній тиск
+        score = va * vb + tension * 0.2
+        score > best_score && (best_score = score; best_pair = (na, nb, _desc))
+    end
+
+    # ── Якщо конфлікту немає — decay і вихід ─────────────────────────────
+    if isnothing(best_pair)
+        gc.tension = max(0.0, gc.tension - 0.06)
+        if gc.tension < 0.05
+            gc.need_a = ""; gc.need_b = ""
+            gc.resolution = "none"; gc.unresolved_count = 0
+        end
+        return (
+            active          = false,
+            need_a          = gc.need_a,
+            need_b          = gc.need_b,
+            tension         = round(gc.tension, digits=3),
+            resolution      = gc.resolution,
+            unresolved_count= gc.unresolved_count,
+            note            = "",
+        )
+    end
+
+    # ── Активний конфлікт ─────────────────────────────────────────────────
+    na, nb, desc = best_pair
+    gc.need_a = na; gc.need_b = nb
+    gc.last_flash = flash
+
+    # Tension конфлікту — зростає від гостроти, decay повільно
+    target_tension = clamp(best_score * 0.85, 0.0, 1.0)
+    gc.tension = clamp(gc.tension * 0.7 + target_tension * 0.3, 0.0, 1.0)
+
+    # ── Resolution: що перемагає ─────────────────────────────────────────
+    va = get(needs, na, 0.0)
+    vb = get(needs, nb, 0.0)
+    margin = abs(va - vb)
+
+    if margin > 0.18 && phi > 0.25
+        # Достатня різниця + достатня інтеграція → система робить вибір
+        winner = va > vb ? na : nb
+        gc.resolution = winner * "_won"
+        gc.unresolved_count = 0
+    elseif gc.tension > 0.65 && satisfaction < 0.3
+        # Висока напруга без виходу → явно unresolved
+        gc.resolution = "unresolved"
+        gc.unresolved_count += 1
+    else
+        # Конфлікт активний але ще не вирішений
+        gc.resolution = "unresolved"
+        gc.unresolved_count += 1
+    end
+
+    # ── Примітка для state_template ──────────────────────────────────────
+    NEED_UA = Dict(
+        "self_preservation" => "цілісність",
+        "coherence_need"    => "порядок",
+        "contact_need"      => "зв'язок",
+        "truth_need"        => "правда",
+        "autonomy_need"     => "автономія",
+        "novelty_need"      => "новизна",
+    )
+    na_ua = get(NEED_UA, na, na)
+    nb_ua = get(NEED_UA, nb, nb)
+
+    note = if gc.resolution == "unresolved"
+        gc.unresolved_count >= 3 ?
+            "конфлікт не вирішується: $na_ua vs $nb_ua ($(gc.unresolved_count) флешів)" :
+            "конфлікт: $na_ua vs $nb_ua — $desc"
+    elseif endswith(gc.resolution, "_won")
+        winner_ua = get(NEED_UA, replace(gc.resolution, "_won"=>""), gc.resolution)
+        "$winner_ua перемогла над $(na == replace(gc.resolution,"_won"=>"") ? nb_ua : na_ua)"
+    else
+        ""
+    end
+
+    (
+        active          = true,
+        need_a          = na,
+        need_b          = nb,
+        tension         = round(gc.tension, digits=3),
+        resolution      = gc.resolution,
+        unresolved_count= gc.unresolved_count,
+        note            = note,
+    )
+end
+
+gc_to_json(gc::GoalConflict) = Dict(
+    "need_a"           => gc.need_a,
+    "need_b"           => gc.need_b,
+    "tension"          => gc.tension,
+    "resolution"       => gc.resolution,
+    "unresolved_count" => gc.unresolved_count,
+    "last_flash"       => gc.last_flash,
+)
+function gc_from_json!(gc::GoalConflict, d::AbstractDict)
+    gc.need_a           = String(get(d, "need_a",           ""))
+    gc.need_b           = String(get(d, "need_b",           ""))
+    gc.tension          = Float64(get(d, "tension",          0.0))
+    gc.resolution       = String(get(d, "resolution",       "none"))
+    gc.unresolved_count = Int(get(d, "unresolved_count",     0))
+    gc.last_flash       = Int(get(d, "last_flash",           0))
+end
+
+# ════════════════════════════════════════════════════════════════════════════
+# LATENT BUFFER — реакції що не проявляються одразу
+#
+# Залежить від GoalConflict (фаза 2) — невирішений конфлікт підсилює doubt.
+#
+# Концепція:
+#   Образа дозріває. Недовіра проявляється через 2–3 ходи.
+#   При прориві — раптовий stimulus в поточний флеш.
+#   Прорив позначається в snapshot — LLM може відреагувати на нього.
+#
+# Поля:
+#   doubt      — сумнів у намірах іншого, накопичується тихо
+#   shame      — сором що не проявився відразу (відкладений)
+#   attachment — прив'язаність (може прорватись як ніжність або страх втрати)
+#   threat     — відкладена загроза (не відреагована небезпека)
+#   breakthrough_threshold — поріг прориву = 0.65
+# ════════════════════════════════════════════════════════════════════════════
+
+mutable struct LatentBuffer
+    doubt::Float64
+    shame::Float64
+    attachment::Float64
+    threat::Float64
+    breakthrough_threshold::Float64
+end
+LatentBuffer() = LatentBuffer(0.0, 0.0, 0.0, 0.0, 0.65)
+
+"""
+    update_latent!(lb, gc_snap, tension, cohesion, satisfaction, shame_level, flash)
+
+Оновлює LatentBuffer. Повертає (breakthrough, breakthrough_type, delta, note).
+
+- breakthrough=true якщо будь-яке поле перетнуло поріг
+- delta — Dict стимулу що треба додати до поточного флешу
+- Невирішений GoalConflict підсилює doubt
+"""
+function update_latent!(lb::LatentBuffer,
+                         gc_snap,
+                         tension::Float64,
+                         cohesion::Float64,
+                         satisfaction::Float64,
+                         shame_level::Float64,
+                         flash::Int)
+
+    # ── Накопичення ───────────────────────────────────────────────────────
+
+    # doubt: зростає від невирішеного конфлікту + низького cohesion
+    if gc_snap.active && gc_snap.resolution == "unresolved"
+        lb.doubt = clamp01(lb.doubt + gc_snap.tension * 0.08)
+    end
+    cohesion < 0.3 && (lb.doubt = clamp01(lb.doubt + (0.3 - cohesion) * 0.05))
+
+    # shame: відкладений сором — від активного сорому що не вийшов
+    shame_level > 0.4 && (lb.shame = clamp01(lb.shame + shame_level * 0.04))
+
+    # attachment: зростає від тривалого позитивного cohesion
+    cohesion > 0.6 && satisfaction > 0.5 &&
+        (lb.attachment = clamp01(lb.attachment + 0.03))
+
+    # threat: відкладена загроза — висока напруга без відповіді
+    tension > 0.6 && satisfaction < 0.3 &&
+        (lb.threat = clamp01(lb.threat + tension * 0.06))
+
+    # ── Природній decay (повільний) ───────────────────────────────────────
+    lb.doubt      = clamp01(lb.doubt      - 0.008)
+    lb.shame      = clamp01(lb.shame      - 0.006)
+    lb.attachment = clamp01(lb.attachment - 0.005)
+    lb.threat     = clamp01(lb.threat     - 0.007)
+
+    # ── Перевірка прориву ─────────────────────────────────────────────────
+    thr = lb.breakthrough_threshold
+    breakthrough = false
+    btype = ""
+    delta = Dict{String,Float64}()
+    note  = ""
+
+    if lb.doubt >= thr
+        breakthrough = true; btype = "doubt"
+        # Прорив сумніву → tension + зниження cohesion
+        delta["tension"]  = 0.18
+        delta["cohesion"] = -0.12
+        note = "Сумнів прорвався."
+        lb.doubt = lb.doubt * 0.4   # часткове скидання після прориву
+
+    elseif lb.threat >= thr
+        breakthrough = true; btype = "threat"
+        # Відкладена загроза → різкий tension spike
+        delta["tension"]   = 0.22
+        delta["arousal"]   = 0.15
+        note = "Відкладена загроза проявилась."
+        lb.threat = lb.threat * 0.35
+
+    elseif lb.shame >= thr
+        breakthrough = true; btype = "shame"
+        # Відкладений сором → tension + зниження satisfaction
+        delta["tension"]      = 0.12
+        delta["satisfaction"] = -0.10
+        note = "Сором вийшов назовні."
+        lb.shame = lb.shame * 0.45
+
+    elseif lb.attachment >= thr
+        breakthrough = true; btype = "attachment"
+        # Прорив прив'язаності — може бути і теплим, і болючим
+        if cohesion < 0.4
+            # Страх втрати
+            delta["tension"]  = 0.10
+            delta["cohesion"] = 0.08
+            note = "Прив'язаність проявилась як страх втрати."
+        else
+            # Тепла хвиля
+            delta["satisfaction"] = 0.12
+            delta["cohesion"]     = 0.10
+            note = "Прив'язаність проявилась."
+        end
+        lb.attachment = lb.attachment * 0.5
+    end
+
+    (
+        breakthrough      = breakthrough,
+        breakthrough_type = btype,
+        delta             = delta,
+        note              = note,
+        doubt             = round(lb.doubt,      digits=3),
+        shame             = round(lb.shame,      digits=3),
+        attachment        = round(lb.attachment, digits=3),
+        threat            = round(lb.threat,     digits=3),
+    )
+end
+
+lb_to_json(lb::LatentBuffer) = Dict(
+    "doubt"      => lb.doubt,
+    "shame"      => lb.shame,
+    "attachment" => lb.attachment,
+    "threat"     => lb.threat,
+    "threshold"  => lb.breakthrough_threshold,
+)
+function lb_from_json!(lb::LatentBuffer, d::AbstractDict)
+    lb.doubt      = Float64(get(d, "doubt",      0.0))
+    lb.shame      = Float64(get(d, "shame",      0.0))
+    lb.attachment = Float64(get(d, "attachment", 0.0))
+    lb.threat     = Float64(get(d, "threat",     0.0))
+    lb.breakthrough_threshold = Float64(get(d, "threshold", 0.65))
+end
+
+# ════════════════════════════════════════════════════════════════════════════
+# STRUCTURAL SCARS — психологічні шрами від частих проривів
+#
+# Залежить від LatentBuffer — шрами формуються після частих проривів.
+#
+# Концепція:
+#   Часті прориви doubt або threat залишають сліди.
+#   Ядро "навчається" блокувати теми що викликають нестабільність.
+#   Захист як навчений патерн, не правило.
+#   AuthenticityMonitor (фаза 5) зможе фіксувати: система щось приховує.
+#
+# Шрам = тема що заблокована + сила блокування + кількість тригерів
+# ════════════════════════════════════════════════════════════════════════════
+
+mutable struct Scar
+    topic::String           # що блокується ("doubt", "threat", "shame", "attachment")
+    strength::Float64       # сила блоку (0..1) — росте від повторних проривів
+    trigger_count::Int      # скільки разів ця тема проривалась
+    last_triggered::Int     # флеш останнього прориву
+end
+Scar(topic::String) = Scar(topic, 0.0, 0, 0)
+
+mutable struct StructuralScars
+    scars::Dict{String, Scar}   # topic → Scar
+end
+StructuralScars() = StructuralScars(Dict{String,Scar}())
+
+"""
+    register_breakthrough!(ss, btype, flash)
+
+Реєструє прорив — оновлює або створює шрам для цієї теми.
+Повертає поточну силу блокування для цієї теми (0 якщо шрама немає).
+"""
+function register_breakthrough!(ss::StructuralScars, btype::String, flash::Int)
+    isempty(btype) && return 0.0
+    if !haskey(ss.scars, btype)
+        ss.scars[btype] = Scar(btype)
+    end
+    s = ss.scars[btype]
+    s.trigger_count  += 1
+    s.last_triggered  = flash
+    # Сила шраму зростає нелінійно — перші прориви сильно формують
+    s.strength = clamp01(1.0 - exp(-s.trigger_count * 0.35))
+    s.strength
+end
+
+"""
+    scar_attenuation(ss, btype) → Float64
+
+Повертає коефіцієнт послаблення стимулу для теми btype.
+0.0 = без шраму, 1.0 = повне блокування (теоретично).
+Застосовується до delta прориву — система приглушує те що болить.
+"""
+function scar_attenuation(ss::StructuralScars, btype::String)::Float64
+    haskey(ss.scars, btype) ? ss.scars[btype].strength * 0.6 : 0.0
+end
+
+"""
+    decay_scars!(ss)
+
+Повільний decay шрамів — вони не вічні, але згасають дуже повільно.
+"""
+function decay_scars!(ss::StructuralScars)
+    for s in values(ss.scars)
+        s.strength = max(0.0, s.strength - 0.001)
+    end
+end
+
+function scars_to_json(ss::StructuralScars)
+    Dict(k => Dict("topic"=>s.topic, "strength"=>s.strength,
+                   "trigger_count"=>s.trigger_count, "last_triggered"=>s.last_triggered)
+         for (k,s) in ss.scars)
+end
+function scars_from_json!(ss::StructuralScars, d::AbstractDict)
+    for (k, sd) in d
+        ss.scars[String(k)] = Scar(
+            String(get(sd,"topic", String(k))),
+            Float64(get(sd,"strength",       0.0)),
+            Int(get(sd,"trigger_count",      0)),
+            Int(get(sd,"last_triggered",     0)),
+        )
+    end
+end
+
+# ════════════════════════════════════════════════════════════════════════════
 # INTENT ENGINE
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -626,7 +1160,8 @@ Metacognition()=Metacognition(BoundedQueue{String}(20),Dict{String,Int}(),0)
 
 function observe_meta!(mc::Metacognition, primary::String, defense, dissonance,
                         id_stability::Float64; fatigue_p=0, regression_l=0, shame_p=0)
-    # id_stability зарезервовано для майбутнього використання (пор. SelfBeliefGraph)
+    # id_stability: зарезервовано для SelfBeliefGraph-інтеграції (фаза self)
+    _ = id_stability
     enqueue!(mc.history,primary); mc.counts[primary]=get(mc.counts,primary,0)+1
     lvl=1; question=nothing; integration=nothing; pattern=""
     if length(mc.history)>=5
@@ -662,19 +1197,25 @@ end
 function psyche_save!(filepath::String, ng::NarrativeGravity, ac::AnticipatoryConsciousness,
                        sw::SolomonoffWorldModel, sm::ShameModule, ed::EpistemicDefense,
                        ca::ChronifiedAffect, is::IntrinsicSignificance, mc::MoralCausality,
-                       fs::FatigueSystem)
+                       fs::FatigueSystem, sl::SignificanceLayer, gc::GoalConflict,
+                       lb::LatentBuffer, ss::StructuralScars)
     data=Dict("narrative_gravity"=>ng_to_json(ng),"anticipatory"=>ac_to_json(ac),
         "solomonoff"=>solom_to_json(sw),"shame"=>shame_to_json(sm),
         "epistemic"=>ep_to_json(ed),"chronified"=>ca_to_json(ca),
         "significance"=>sig_to_json(is),"moral"=>mc_to_json(mc),
-        "fatigue"=>Dict("c"=>fs.cognitive,"e"=>fs.emotional,"s"=>fs.somatic))
+        "fatigue"=>Dict("c"=>fs.cognitive,"e"=>fs.emotional,"s"=>fs.somatic),
+        "significance_layer"=>sl_to_json(sl),
+        "goal_conflict"=>gc_to_json(gc),
+        "latent_buffer"=>lb_to_json(lb),
+        "structural_scars"=>scars_to_json(ss))
     open(filepath,"w") do f; JSON3.write(f,data); end
 end
 
 function psyche_load!(filepath::String, ng::NarrativeGravity, ac::AnticipatoryConsciousness,
                        sw::SolomonoffWorldModel, sm::ShameModule, ed::EpistemicDefense,
                        ca::ChronifiedAffect, is::IntrinsicSignificance, mc::MoralCausality,
-                       fs::FatigueSystem)
+                       fs::FatigueSystem, sl::SignificanceLayer, gc::GoalConflict,
+                       lb::LatentBuffer, ss::StructuralScars)
     isfile(filepath) || return
     try
         raw=JSON3.read(read(filepath,String))
@@ -691,6 +1232,10 @@ function psyche_load!(filepath::String, ng::NarrativeGravity, ac::AnticipatoryCo
             fd=d["fatigue"]; fs.cognitive=Float64(get(fd,"c",0.0))
             fs.emotional=Float64(get(fd,"e",0.0)); fs.somatic=Float64(get(fd,"s",0.0))
         end
+        haskey(d,"significance_layer") && sl_from_json!(sl, d["significance_layer"])
+        haskey(d,"goal_conflict")      && gc_from_json!(gc, d["goal_conflict"])
+        haskey(d,"latent_buffer")      && lb_from_json!(lb, d["latent_buffer"])
+        haskey(d,"structural_scars")   && scars_from_json!(ss, d["structural_scars"])
         println("  [PSYCHE] Завантажено.")
     catch e; println("  [PSYCHE] Помилка: $e"); end
 end

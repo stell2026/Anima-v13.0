@@ -215,6 +215,38 @@ function somatic_marker(body::EmbodiedState)::String
     "тіло нейтральне"
 end
 
+# FIX C: build_inner_voice — замінює somatic_marker як ANCHOR для LLM.
+# somatic_marker повертає 1 з 4 фіксованих рядків і не реагує на м'які переходи.
+# build_inner_voice — композитний опис з кількох вимірів стану.
+# Використовувати в anima_interface.jl замість somatic_marker для inner_voice.
+# SystemMode передається як Int: 0=INTEGRATED, 1=FRAGMENTED, 2=DISINTEGRATED
+function build_inner_voice(body::EmbodiedState, nt::NeurotransmitterState,
+                            crisis_mode_int::Int, phi::Float64)::String
+    parts = String[]
+
+    # Серце / arousal
+    nt.noradrenaline > 0.55  && push!(parts, "серце частіше")
+    nt.noradrenaline < 0.22  && push!(parts, "серце повільне")
+
+    # М'язи
+    body.muscle_tension > 0.65 && push!(parts, "щось стиснуте")
+    body.muscle_tension < 0.22 && push!(parts, "м'язи відпустило")
+
+    # Нутро
+    body.gut_feeling < 0.30  && push!(parts, "нутро тривожне")
+    body.gut_feeling > 0.72  && push!(parts, "нутро спокійне")
+
+    # Інтеграція (phi)
+    phi < 0.15               && push!(parts, "відчуття розпорошене")
+    phi > 0.50               && push!(parts, "щось зібране всередині")
+
+    # Криза
+    crisis_mode_int == 2     && push!(parts, "не знаю де я")
+    crisis_mode_int == 1     && push!(parts, "тримаюсь але непевно")
+
+    isempty(parts) ? "тіло нейтральне" : join(parts, ", ")
+end
+
 body_snapshot(b::EmbodiedState) = (
     heart_rate     = round(b.heart_rate,     digits=3),
     muscle_tension = round(b.muscle_tension, digits=3),
@@ -337,7 +369,7 @@ mutable struct GenerativeModel
 end
 GenerativeModel() = GenerativeModel(
     zeros(3), 0.5, zeros(3), 0.8,
-    [0.3, 0.1, 0.6], 1.0, 1.0, 0.1)
+    [0.3, 0.1, 0.6], 1.0, 1.0, 0.03)
 
 # [A3] Precision-weighted Bayesian belief update
 function update_beliefs!(gm::GenerativeModel, obs::NTuple{3,Float64})::Vector{Float64}
@@ -352,15 +384,23 @@ function update_beliefs!(gm::GenerativeModel, obs::NTuple{3,Float64})::Vector{Fl
 end
 
 # [A2] Variational Free Energy: VFE = Complexity − Accuracy
+#
+# Виправлення: accuracy має вимірюватись відносно PRIOR (що система очікувала),
+# а не відносно posterior (що вже оновила з obs).
+# Стара помилка: (obs - posterior_mu)^2 завжди ≈ 0 бо posterior рахується з obs.
+# Правильно: VFE = prediction_error(obs, prior) / (2*sigma²)
+# = наскільки те що сталось відрізняється від того що очікувалось.
 function compute_vfe(gm::GenerativeModel, obs::NTuple{3,Float64})
     o = collect(obs)
-    accuracy   = -mean((o .- gm.posterior_mu).^2)
-    acc_norm   = safe_nan(clamp01(0.5 - accuracy))
-    sigma2      = gm.prior_sigma^2
-    kl         = sigma2 > 1e-9 ? mean((gm.posterior_mu .- gm.prior_mu).^2) / (2*sigma2) : 0.0
-    complexity = safe_nan(clamp01(kl))
-    vfe        = safe_nan(clamp01(complexity - acc_norm + 0.5))
-    (vfe=round(vfe,digits=3), accuracy=round(acc_norm,digits=3), complexity=round(complexity,digits=3))
+    sigma2     = max(gm.prior_sigma^2, 1e-6)
+    # Prediction error: obs vs prior (не posterior)
+    pred_err   = mean((o .- gm.prior_mu).^2)
+    vfe        = safe_nan(clamp01(pred_err / (2 * sigma2)))
+    # KL complexity: posterior vs prior (для діагностики)
+    kl         = safe_nan(clamp01(mean((gm.posterior_mu .- gm.prior_mu).^2) / (2*sigma2)))
+    # Accuracy: наскільки posterior пояснює obs (для діагностики)
+    acc_norm   = safe_nan(clamp01(1.0 - mean((o .- gm.posterior_mu).^2)))
+    (vfe=round(vfe,digits=3), accuracy=round(acc_norm,digits=3), complexity=round(kl,digits=3))
 end
 
 # [A5] Policy selector — perception vs action via EFE
@@ -390,6 +430,21 @@ const VFE_NOTES = (
     (Inf, "Висока вільна енергія. Модель неадекватна. Потрібні зміни."))
 vfe_note(v::Float64) = isnan(v) ? "VFE невизначений." : first(note for (thr,note) in VFE_NOTES if v < thr)
 
+# FIX A: prevent_prior_collapse!
+# continual_learning (rate=0.03) дрейфує prior_mu → posterior_mu.
+# Після багатьох сесій prior≈posterior → KL≈0 → VFE≈0 → model_coherence=1.0 завжди.
+# Рішення: якщо prior занадто близький до posterior,
+# тягнемо його назад до preferred_vad (те що система "хоче"),
+# а не до того що є. Це зберігає напругу між бажанням і реальністю.
+# Pull rate (0.08) > learning_rate (0.03) — тягнення назад завжди перемагає drift.
+function prevent_prior_collapse!(gm::GenerativeModel)
+    drift = norm(gm.prior_mu .- gm.posterior_mu)
+    if drift < 0.08
+        # Тягнемо до preferred_vad — не до posterior
+        gm.prior_mu = gm.prior_mu .* 0.92 .+ gm.preferred_vad .* 0.08
+    end
+end
+
 gm_to_json(gm::GenerativeModel) = Dict("prior_mu"=>gm.prior_mu,
     "prior_sigma"=>gm.prior_sigma,"preferred_vad"=>gm.preferred_vad,
     "learning_rate"=>gm.learning_rate)
@@ -398,6 +453,12 @@ function gm_from_json!(gm::GenerativeModel, d::AbstractDict)
     haskey(d,"prior_sigma")   && (gm.prior_sigma   = Float64(d["prior_sigma"]))
     haskey(d,"preferred_vad") && (gm.preferred_vad = Float64.(d["preferred_vad"]))
     haskey(d,"learning_rate") && (gm.learning_rate = Float64(d["learning_rate"]))
+    # Примусово виправляємо learning_rate якщо збережено застаріле значення
+    gm.learning_rate > 0.05 && (gm.learning_rate = 0.03)
+    # Якщо prior вже collapsed (занадто близько до нуля / posterior) — скидаємо до preferred_vad
+    if norm(gm.prior_mu) < 0.05
+        gm.prior_mu = copy(gm.preferred_vad)
+    end
 end
 
 # ════════════════════════════════════════════════════════════════════════════

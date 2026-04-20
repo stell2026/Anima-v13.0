@@ -547,8 +547,11 @@ function evaluate_agency!(al::AgencyLoop, actual_vad::NTuple{3,Float64},
     av = collect(actual_vad)
 
     if isnothing(al.current_intent)
-        # Нічого не планувала — все що сталось "просто відбулось"
-        al.causal_ownership = clamp01(al.causal_ownership * 0.9)
+        # FIX B: agency floor — без наміру ownership знижується,
+        # але не нижче FLOOR=0.25. Адитивна формула (max) замість мультиплікативної.
+        # Стара: 0.92 * x + 0.08 * 0.25 — якщо x=0, результат = 0.02, не 0.25.
+        # Нова: decay → clamp знизу. Система завжди може почати рух.
+        al.causal_ownership = max(0.25, al.causal_ownership * 0.95)
         enqueue!(al.ownership_history, al.causal_ownership)
         return _agency_result(al, flash_count, "без наміру")
     end
@@ -562,11 +565,11 @@ function evaluate_agency!(al::AgencyLoop, actual_vad::NTuple{3,Float64},
     # Ownership = наскільки actual ближче до predicted ніж до baseline
     # Якщо dist_to_predicted < dist_to_baseline → намір вплинув
     if dist_to_baseline < 0.01
-        # Нічого не змінилось взагалі — намір не вплинув
-        ownership = 0.2
+        # Нічого не змінилось взагалі — намір не вплинув, але floor захищає
+        ownership = 0.25
     else
         # Чим ближче actual до predicted відносно baseline — тим вища ownership
-        ownership = safe_nan(clamp01(1.0 - dist_to_predicted / (dist_to_baseline + 0.01)))
+        ownership = safe_nan(clamp(1.0 - dist_to_predicted / (dist_to_baseline + 0.01), 0.25, 1.0))
     end
 
     al.causal_ownership = ownership
@@ -617,6 +620,8 @@ al_to_json(al::AgencyLoop) = Dict(
 function al_from_json!(al::AgencyLoop, d::AbstractDict)
     al.agency_confidence = Float64(get(d,"agency_confidence",0.5))
     al.causal_ownership  = Float64(get(d,"causal_ownership",0.5))
+    # Застосовуємо floor при завантаженні — якщо збережено нижче мінімуму
+    al.causal_ownership  = max(0.25, al.causal_ownership)
 end
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -820,6 +825,135 @@ function isc_from_json!(isc::InterSessionConflict, d::AbstractDict)
 end
 
 # ════════════════════════════════════════════════════════════════════════════
+# UNKNOWN REGISTER — суб'єктність росте там де система вміє не знати конкретно
+#
+# Залежить від живої VFE (вже виправлено) і agency (floor виправлено).
+#
+# Концепція:
+#   Не загальне "не знаю" — а конкретний тип невизначеності.
+#   Кожне поле передається в state_template окремо.
+#   LLM може сказати конкретний тип "не знаю", не загальне.
+#
+#   source_uncertainty      — не знаю звідки цей стан
+#   self_model_uncertainty  — не знаю чи правильно читаю себе
+#   world_model_uncertainty — не знаю чи правильно розумію тебе
+#   memory_uncertainty      — не знаю чи це справжня пам'ять
+#                             (буде важливо для фази B — сновидіння)
+# ════════════════════════════════════════════════════════════════════════════
+
+mutable struct UnknownRegister
+    source_uncertainty::Float64      # звідки цей стан — незрозуміло
+    self_model_uncertainty::Float64  # чи правильно читаю себе
+    world_model_uncertainty::Float64 # чи правильно розумію зовнішнє
+    memory_uncertainty::Float64      # чи це справжня пам'ять (для фази B)
+end
+UnknownRegister() = UnknownRegister(0.0, 0.0, 0.0, 0.0)
+
+"""
+    update_unknown!(ur, vfe, agency_confidence, epistemic_trust,
+                    self_world_mismatch, pred_error, flash)
+
+Оновлює UnknownRegister на основі живих показників ядра.
+Повертає NamedTuple з описом для state_template.
+
+Принцип: кожна невизначеність має свій специфічний тригер,
+а не просто "щось пішло не так".
+"""
+function update_unknown!(ur::UnknownRegister,
+                          vfe::Float64,
+                          agency_confidence::Float64,
+                          epistemic_trust::Float64,
+                          self_world_mismatch::Float64,
+                          pred_error::Float64,
+                          flash::Int)
+
+    # ── source_uncertainty: звідки цей стан ──────────────────────────────
+    # Висока VFE + низький pred_error = щось змінилось але не зрозуміло що
+    source_signal = vfe > 0.3 && pred_error < 0.25
+    if source_signal
+        ur.source_uncertainty = clamp01(ur.source_uncertainty + (vfe - 0.3) * 0.15)
+    else
+        ur.source_uncertainty = clamp01(ur.source_uncertainty - 0.02)
+    end
+
+    # ── self_model_uncertainty: чи правильно читаю себе ──────────────────
+    # Низький epistemic_trust — система вже знає що не може собі довіряти
+    # Висока self_world_mismatch — self-model і world-model розходяться
+    self_signal = (1.0 - epistemic_trust) * 0.5 + self_world_mismatch * 0.5
+    ur.self_model_uncertainty = clamp01(
+        ur.self_model_uncertainty * 0.88 + self_signal * 0.12)
+
+    # ── world_model_uncertainty: чи правильно розумію зовнішнє ───────────
+    # Стабільно високий pred_error = зовнішній світ поводиться несподівано
+    # Висока VFE = генеративна модель не пояснює що відбувається
+    world_signal = pred_error * 0.6 + vfe * 0.4
+    ur.world_model_uncertainty = clamp01(
+        ur.world_model_uncertainty * 0.9 + world_signal * 0.1)
+
+    # ── memory_uncertainty: чи це справжня пам'ять ───────────────────────
+    # Зараз: низька agency_confidence = система не впевнена що її дії мали ефект
+    # → ретроспективно: "а чи те що я пам'ятаю — справді так і було?"
+    # Після фази B: буде підсилюватись коли Anima "прокидається" після сновидінь
+    mem_signal = (1.0 - agency_confidence) * 0.3
+    ur.memory_uncertainty = clamp01(
+        ur.memory_uncertainty * 0.95 + mem_signal * 0.05)
+
+    # ── Dominant uncertainty ──────────────────────────────────────────────
+    # Стабільний порядок: сортуємо за ключем щоб при однакових значеннях
+    # результат був детермінованим (не залежав від порядку хешів Dict)
+    ordered = sort([
+        ("source_uncertainty",      ur.source_uncertainty),
+        ("self_model_uncertainty",  ur.self_model_uncertainty),
+        ("world_model_uncertainty", ur.world_model_uncertainty),
+        ("memory_uncertainty",      ur.memory_uncertainty),
+    ], by=x->x[2], rev=true)
+    dominant     = ordered[1][1]
+    dominant_val = ordered[1][2]
+
+    # ── Примітки для state_template — конкретний тип невизначеності ──────
+    UNKNOWN_NOTES = Dict(
+        "source_uncertainty"      => "не знаю звідки цей стан",
+        "self_model_uncertainty"  => "не знаю чи правильно читаю себе",
+        "world_model_uncertainty" => "не знаю чи правильно розумію тебе",
+        "memory_uncertainty"      => "не знаю чи це справжня пам'ять",
+    )
+
+    # Поріг для виводу — тільки якщо справді значуще
+    note = dominant_val > 0.35 ? get(UNKNOWN_NOTES, dominant, "") : ""
+
+    # Детальний опис для глибшого аналізу
+    details = String[]
+    ur.source_uncertainty      > 0.4 && push!(details, "джерело($(round(ur.source_uncertainty,digits=2)))")
+    ur.self_model_uncertainty  > 0.4 && push!(details, "self($(round(ur.self_model_uncertainty,digits=2)))")
+    ur.world_model_uncertainty > 0.4 && push!(details, "world($(round(ur.world_model_uncertainty,digits=2)))")
+    ur.memory_uncertainty      > 0.4 && push!(details, "memory($(round(ur.memory_uncertainty,digits=2)))")
+
+    (
+        dominant          = dominant,
+        dominant_val      = round(dominant_val, digits=3),
+        note              = note,
+        details           = join(details, ", "),
+        source            = round(ur.source_uncertainty,      digits=3),
+        self_model        = round(ur.self_model_uncertainty,  digits=3),
+        world_model       = round(ur.world_model_uncertainty, digits=3),
+        memory            = round(ur.memory_uncertainty,      digits=3),
+    )
+end
+
+ur_to_json(ur::UnknownRegister) = Dict(
+    "source_uncertainty"      => ur.source_uncertainty,
+    "self_model_uncertainty"  => ur.self_model_uncertainty,
+    "world_model_uncertainty" => ur.world_model_uncertainty,
+    "memory_uncertainty"      => ur.memory_uncertainty,
+)
+function ur_from_json!(ur::UnknownRegister, d::AbstractDict)
+    ur.source_uncertainty      = Float64(get(d, "source_uncertainty",      0.0))
+    ur.self_model_uncertainty  = Float64(get(d, "self_model_uncertainty",  0.0))
+    ur.world_model_uncertainty = Float64(get(d, "world_model_uncertainty", 0.0))
+    ur.memory_uncertainty      = Float64(get(d, "memory_uncertainty",      0.0))
+end
+
+# ════════════════════════════════════════════════════════════════════════════
 # BOUNDEDQUEUE — Base.iterate (виправлення для collect / mean / length)
 #
 # BoundedQueue визначена в anima_core.jl але без методу iterate,
@@ -831,6 +965,46 @@ end
 # тоді залиш .data нижче.
 # Якщо поле називається інакше (напр. .queue, .buf) — заміни відповідно.
 # ════════════════════════════════════════════════════════════════════════════
+
+# ════════════════════════════════════════════════════════════════════════════
+# FIX D: DIALOG → SELF BELIEF
+# ════════════════════════════════════════════════════════════════════════════
+
+"""
+    dialog_to_belief_signal!(sbg, user_msg, flash)
+
+Витягує прямі факти про себе з повідомлення користувача
+і додає їх до SelfBeliefGraph.
+
+Тільки для верифікованих фактів (ім'я, пряме звернення) —
+НЕ для інтерпретацій і суджень.
+Без цього ім'я живе тільки в anima_dialog.json і зникає без history.
+"""
+function dialog_to_belief_signal!(sbg::SelfBeliefGraph,
+                                   user_msg::String, flash::Int)
+    isempty(user_msg) && return
+
+    # Ім'я: "тебе звати X", "твоє ім'я X", "ти — X"
+    m = match(r"(?:тебе звати|твоє\s+ім'я|ти\s*[—–-])\s*(\w+)"i, user_msg)
+    if !isnothing(m)
+        name_belief = "моє ім'я $(m.captures[1])"
+        if !haskey(sbg.beliefs, name_belief)
+            learn_belief!(sbg, name_belief;
+                confidence=0.75, centrality=0.45, rigidity=0.70)
+        else
+            confirm_belief!(sbg, name_belief, flash; strength=0.05)
+        end
+    end
+
+    # Мова: "розмовляй українською / англійською"
+    if occursin(r"розмовляй\s+украін"i, user_msg) ||
+       occursin(r"говори\s+украін"i,    user_msg)
+        lang_belief = "я спілкуюсь українською"
+        !haskey(sbg.beliefs, lang_belief) &&
+            learn_belief!(sbg, lang_belief;
+                confidence=0.80, centrality=0.3, rigidity=0.75)
+    end
+end
 
 if !hasmethod(Base.iterate, Tuple{BoundedQueue, Int})
     Base.iterate(q::BoundedQueue, state::Int=1) =

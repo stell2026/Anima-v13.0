@@ -32,7 +32,7 @@ The architecture draws on several research traditions:
 
 ## What's New in v13.06
 
-The architecture has grown significantly from v6. The key additions:
+The key additions:
 
 - **Julia rewrite** — the entire system is now in Julia for performance and numeric clarity
 - **Input LLM (`anima_input_llm.jl`)** — an isolated pre-processing stage that translates raw user text into a structured JSON stimulus before it enters the simulation (see L0 in Architecture)

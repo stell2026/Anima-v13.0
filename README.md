@@ -418,8 +418,7 @@ anima = Anima(
 ├── anima_core.json
 ├── anima_psyche.json
 ├── anima_self.json
-├── anima_dialog.json
-└── SETUP.md
+└── anima_dialog.json
 ```
 
 `anima_interface.jl` includes all other files automatically. `anima_input_llm.jl` is loaded conditionally — only if the file exists.

@@ -703,10 +703,30 @@ end
 # ════════════════════════════════════════════════════════════════════════════
 
 struct IITModule end
-function compute_phi(::IITModule, vad::NTuple{3,Float64}, tension::Float64, cohesion::Float64)::Float64
-    diff  = std(collect(vad))*2
-    integ = 1.0 - abs(tension - cohesion)
-    round(safe_nan(clamp(diff*integ, 0.0, 1.0)), digits=3)
+function compute_phi(::IITModule, vad::NTuple{3,Float64}, tension::Float64, cohesion::Float64,
+                     sbg_stability::Float64=0.7, epistemic_trust::Float64=0.75,
+                     allostatic_load::Float64=0.0)::Float64
+    # VAD інтеграція — різноманітність внутрішнього стану
+    # (низька в спокої — це нормально, не домінує)
+    vad_integration = clamp01(std(collect(vad)) * 2.0)
+
+    # Узгодженість self-model і тіла
+    # Стабільний граф beliefs + невисоке allostatic навантаження = система ціла
+    self_body_sync = clamp01(sbg_stability * (1.0 - allostatic_load * 0.5))
+
+    # Баланс tension/cohesion — система не розривається між загрозою і зв'язком
+    tc_balance = clamp01(1.0 - abs(tension - cohesion))
+
+    # Epistemic trust як множник: чи система довіряє власним сигналам
+    # Без цього навіть узгоджена система не інтегрована — вона не знає що вона є
+    # Діапазон 0.5..1.0 — навіть при нульовому trust є мінімальна інтеграція
+    trust_factor = 0.5 + epistemic_trust * 0.5
+
+    phi = (vad_integration * 0.25 +
+           self_body_sync  * 0.40 +
+           tc_balance      * 0.35) * trust_factor
+
+    round(safe_nan(clamp(phi, 0.0, 1.0)), digits=3)
 end
 
 mutable struct PredictiveProcessor
@@ -855,7 +875,10 @@ function core_save!(cm::CoreMemory, p::Personality, to::TemporalOrientation,
         "heartbeat"=>hb_to_json(hb),
         "interoception"=>intero_to_json(ii),
         "existential_anchor"=>anchor_to_json(ea))
-    open(cm.filepath,"w") do f; JSON3.write(f,data); end
+    # Атомарний запис: пишемо в .tmp, потім mv (захист від конкурентного IO з фоновим процесом)
+    _tmp = cm.filepath * ".tmp"
+    open(_tmp,"w") do f; JSON3.write(f,data); end
+    mv(_tmp, cm.filepath; force=true)
 end
 
 function core_load!(cm::CoreMemory, p::Personality, to::TemporalOrientation,

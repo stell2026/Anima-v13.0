@@ -399,7 +399,7 @@ function subj_predict!(subj::SubjectivityEngine,
           clamp(base_pe, 0.0, 1.0),
           confidence, ts))
 
-    id_row = first(Tables.rows(DBInterface.execute(db,
+    id_row = first(Tables.rowtable(DBInterface.execute(db,
         "SELECT last_insert_rowid() as id")))
     pred_id = Int(id_row.id)
 
@@ -433,7 +433,7 @@ function subj_outcome!(subj::SubjectivityEngine,
     isnothing(pred_id) && return
 
     # Знаходимо прогноз
-    pred_rows = Tables.rows(DBInterface.execute(db, """
+    pred_rows = Tables.rowtable(DBInterface.execute(db, """
     SELECT pred_arousal, pred_valence, pred_tension, pred_pe, pred_confidence
     FROM prediction_log WHERE id = ? AND closed = 0
     """, (pred_id,)))
@@ -649,13 +649,13 @@ function subj_emerge_beliefs!(subj::SubjectivityEngine, flash::Int)
     db  = subj.mem.db
 
     # ── Збираємо вікно episodic ────────────────────────────────────────────────
-    rows = collect(Tables.rows(DBInterface.execute(db, """
+    rows = Tables.rowtable(DBInterface.execute(db, """
     SELECT arousal, valence, prediction_error, tension, emotion, weight
     FROM episodic_memory
     WHERE weight > 0.3
     ORDER BY flash DESC
     LIMIT ?
-    """, (SUBJ_PATTERN_WINDOW,))))
+    """, (SUBJ_PATTERN_WINDOW,)))
 
     length(rows) < SUBJ_PATTERN_MIN_OCCUR && return
 
@@ -714,7 +714,7 @@ function subj_emerge_beliefs!(subj::SubjectivityEngine, flash::Int)
         label = "$(dom_emotion)$(val_sign)_a$(round(cl[:ca], digits=1))"
 
         # Шукаємо чи вже є такий кандидат (за близькістю центру)
-        existing_rows = Tables.rows(DBInterface.execute(db, """
+        existing_rows = Tables.rowtable(DBInterface.execute(db, """
         SELECT id, confirmations, promoted
         FROM pattern_candidates
         WHERE ABS(centroid_arousal - ?) < ? AND
@@ -1002,7 +1002,7 @@ function _subj_refresh_emerged!(subj::SubjectivityEngine)
     db = subj.mem.db
     subj._emerged_cache = NamedTuple[]
 
-    for row in Tables.rows(DBInterface.execute(db, """
+    for row in Tables.rowtable(DBInterface.execute(db, """
     SELECT key, belief_type, centroid_arousal, centroid_valence,
            centroid_tension, centroid_pe, strength, valence_bias,
            activation_thr, confirmations, contradictions
@@ -1031,7 +1031,7 @@ function _subj_refresh_stances!(subj::SubjectivityEngine)
     db = subj.mem.db
     empty!(subj._stance_cache)
 
-    for row in Tables.rows(DBInterface.execute(db, """
+    for row in Tables.rowtable(DBInterface.execute(db, """
     SELECT stance_key, valence_stance, certainty,
            avoidance_weight, approach_weight, encounter_count
     FROM positional_stances
@@ -1064,7 +1064,7 @@ function _subj_mean_episodic(db::SQLite.DB, col::String,
 
     sql = "SELECT COALESCE(AVG($col), ?) as val FROM (SELECT $col FROM episodic_memory " *
           "WHERE weight > 0.3 ORDER BY flash DESC LIMIT ?)"
-    rows = Tables.rows(DBInterface.execute(db, sql, (default, limit)))
+    rows = Tables.rowtable(DBInterface.execute(db, sql, (default, limit)))
     for r in rows
         return _sfdb(r.val, default)
     end
@@ -1072,7 +1072,7 @@ function _subj_mean_episodic(db::SQLite.DB, col::String,
 end
 
 function _count_episodic(db::SQLite.DB, emotion::String)::Int
-    rows = Tables.rows(DBInterface.execute(db, """
+    rows = Tables.rowtable(DBInterface.execute(db, """
     SELECT COUNT(*) as n FROM episodic_memory
     WHERE emotion = ? AND weight > 0.3
     """, (emotion,)))
@@ -1105,11 +1105,11 @@ end
 function subj_snapshot(subj::SubjectivityEngine)
     db = subj.mem.db
 
-    n_beliefs_row = first(Tables.rows(DBInterface.execute(db,
+    n_beliefs_row = first(Tables.rowtable(DBInterface.execute(db,
         "SELECT COUNT(*) as n FROM emerged_beliefs WHERE strength > 0.1")))
     n_beliefs = _sidb(n_beliefs_row.n)
 
-    n_candidates_row = first(Tables.rows(DBInterface.execute(db,
+    n_candidates_row = first(Tables.rowtable(DBInterface.execute(db,
         "SELECT COUNT(*) as n FROM pattern_candidates WHERE promoted = 0")))
     n_candidates = _sidb(n_candidates_row.n)
 
@@ -1234,3 +1234,48 @@ function clamp_merged_delta!(delta::Dict{String, Float64})
     delta
 end
 
+# ════════════════════════════════════════════════════════════════════════════
+# ПРИКЛАД ІНТЕГРАЦІЇ В experience!
+# ════════════════════════════════════════════════════════════════════════════
+
+#=
+Як вбудувати в існуючий experience! pipeline:
+
+function experience!(a::Anima, stim::Dict{String,Float64}; emotion::String="")
+
+    # ── До L0 ──────────────────────────────────────────────────────────────
+    pred_id = subj_predict!(a.subj, a.flash, emotion, stim;
+                          chronified_affect=a.ca)  # a.ca::ChronifiedAffect з psyche.jl
+
+    # ── Між L0 і L1 (разом з memory_stimulus_bias) ─────────────────────────
+    mem_delta  = memory_stimulus_bias(a.mem, stim, emotion, a.flash)
+    subj_delta = subj_interpret!(a.subj, stim, emotion, a.flash)
+    # gravity_d — результат gravity_reactor_delta(a.ng, a.flash) з anima_psyche.jl
+    grav_delta = Dict{String,Float64}(
+        "tension"      => gravity_d.tension_d,
+        "satisfaction" => gravity_d.satisfaction_d,
+        "cohesion"     => gravity_d.cohesion_d)
+
+    # Об'єднуємо всі три delta-шари і захищаємо від адитивного перестимулювання.
+    # FIX: NarrativeGravity + subj_interpret! + memory_bias можуть збігтись в напрямку.
+    # clamp_merged_delta! гарантує що жоден реактор не перевищить 25% за флеш.
+    merged_delta = mergewith(+, mem_delta, subj_delta, grav_delta)
+    clamp_merged_delta!(merged_delta)
+    stim = apply_delta(stim, merged_delta)
+
+    # ── L1..L5 — стандартний pipeline ──────────────────────────────────────
+    # ...
+    # memory_nt_baseline!(a.mem, nt, a.flash)
+
+    # ── Surprise PE bias між L1 і L2 ───────────────────────────────────────
+    # pe = memory_pred_bias(a.mem, raw_pe, a.flash)
+    # pe = clamp(pe + subj_surprise_pe_bias(a.subj), 0.0, 1.0)
+
+    # ── Після L6 ────────────────────────────────────────────────────────────
+    subj_outcome!(a.subj, a.flash,
+        actual_arousal, actual_valence, actual_tension, actual_pe, emotion)
+
+    memory_write_event!(a.mem, a.flash, emotion,
+        actual_arousal, actual_valence, actual_pe, self_impact, tension, phi)
+end
+=#

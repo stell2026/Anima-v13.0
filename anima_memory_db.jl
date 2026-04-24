@@ -195,14 +195,14 @@ end
 function _refresh_cache!(mem::MemoryDB)
     # affect_state
     empty!(mem._affect_cache)
-    for row in Tables.rows(DBInterface.execute(mem.db,
+    for row in Tables.rowtable(DBInterface.execute(mem.db,
             "SELECT name, value FROM affect_state"))
         mem._affect_cache[row.name] = row.value
     end
 
     # semantic_memory
     empty!(mem._semantic_cache)
-    for row in Tables.rows(DBInterface.execute(mem.db,
+    for row in Tables.rowtable(DBInterface.execute(mem.db,
             "SELECT key, value FROM semantic_memory"))
         mem._semantic_cache[row.key] = row.value
     end
@@ -291,7 +291,7 @@ function memory_write_event!(mem::MemoryDB,
 
     # Дедуплікація через signature — якщо дуже схожа подія вже є недавно,
     # не створюємо новий запис а підсилюємо weight існуючого
-    dedup_rows = Tables.rows(DBInterface.execute(mem.db, """
+    dedup_rows = Tables.rowtable(DBInterface.execute(mem.db, """
     SELECT id, weight FROM episodic_memory
     WHERE ABS(signature - ?) < 0.08 AND flash >= ?
     ORDER BY flash DESC LIMIT 1
@@ -320,11 +320,11 @@ function memory_write_event!(mem::MemoryDB,
     # ── Асоціативні зв'язки — знайти схожу подію і зв'язати ─────────────
     # Similarity = 1 - нормована евклідова відстань у просторі (arousal, valence, tension)
     # Беремо тільки топ-1 схожу (не будуємо повний граф — надто дорого)
-    new_id_row = first(Tables.rows(DBInterface.execute(mem.db,
+    new_id_row = first(Tables.rowtable(DBInterface.execute(mem.db,
         "SELECT last_insert_rowid() as id")))
     new_id = Int(new_id_row.id)
 
-    similar_rows = Tables.rows(DBInterface.execute(mem.db, """
+    similar_rows = Tables.rowtable(DBInterface.execute(mem.db, """
     SELECT id, arousal, valence, tension
     FROM episodic_memory
     WHERE id != ? AND weight > 0.3
@@ -374,7 +374,7 @@ function memory_stimulus_bias(mem::MemoryDB,
     delta = Dict{String,Float64}()
 
     # Беремо останні важливі події з тією самою емоцією
-    rows = Tables.rows(DBInterface.execute(mem.db, """
+    rows = Tables.rowtable(DBInterface.execute(mem.db, """
     SELECT arousal, valence, tension, weight
     FROM episodic_memory
     WHERE emotion = ? AND weight > 0.4
@@ -414,7 +414,7 @@ function memory_stimulus_bias(mem::MemoryDB,
     # система упереджено "тримає дистанцію".
     # Передаємо як зниження satisfaction — apply_stimulus! знає цей ключ.
     # (Не "avoidance" — такого ключа немає в apply_stimulus!)
-    avoid_rows = Tables.rows(DBInterface.execute(mem.db, """
+    avoid_rows = Tables.rowtable(DBInterface.execute(mem.db, """
     SELECT COALESCE(AVG(valence),    0.0) as avg_val,
            COALESCE(AVG(self_impact),0.0) as avg_imp,
            COALESCE(AVG(weight),     0.0) as avg_w
@@ -642,7 +642,7 @@ function _memory_prune!(mem::MemoryDB)
         DELETE FROM episodic_memory WHERE weight < ?
         """, (MEM_MIN_WEIGHT,))
 
-        count_row = first(Tables.rows(DBInterface.execute(mem.db,
+        count_row = first(Tables.rowtable(DBInterface.execute(mem.db,
             "SELECT COUNT(*) as n FROM episodic_memory")))
         n = ismissing(count_row.n) ? 0 : Int(count_row.n)
 
@@ -671,7 +671,7 @@ function _memory_consolidate!(mem::MemoryDB)
     DBInterface.execute(mem.db, "BEGIN TRANSACTION")
     try
         # Беремо топ-K найважливіших подій
-        rows = Tables.rows(DBInterface.execute(mem.db, """
+        rows = Tables.rowtable(DBInterface.execute(mem.db, """
         SELECT CAST(arousal          AS REAL) as arousal,
                CAST(valence          AS REAL) as valence,
                CAST(prediction_error AS REAL) as prediction_error,
@@ -784,7 +784,7 @@ function _memory_consolidate!(mem::MemoryDB)
         end
 
         # ── Latent buffer release ─────────────────────────────────────────────
-        latent_rows = Tables.rows(DBInterface.execute(mem.db, """
+        latent_rows = Tables.rowtable(DBInterface.execute(mem.db, """
         SELECT COALESCE(SUM(importance), 0.0) as total_imp,
                COALESCE(AVG(valence),    0.0) as avg_val,
                COALESCE(AVG(tension),    0.5) as avg_ten,
@@ -870,7 +870,7 @@ end
 Повертає рядок типу "пам'ятаю схожий стан: страх (3 рази)" або "".
 """
 function memory_recall_note(mem::MemoryDB, emotion::String, flash::Int)::String
-    rows = Tables.rows(DBInterface.execute(mem.db, """
+    rows = Tables.rowtable(DBInterface.execute(mem.db, """
     SELECT COUNT(*) as n, COALESCE(AVG(weight), 0.0) as avg_w
     FROM episodic_memory
     WHERE emotion = ? AND weight > 0.3
@@ -917,7 +917,7 @@ end
 Короткий зліпок стану пам'яті для логу або :memory команди в REPL.
 """
 function memory_snapshot(mem::MemoryDB)
-    episodic_count_row = first(Tables.rows(DBInterface.execute(mem.db,
+    episodic_count_row = first(Tables.rowtable(DBInterface.execute(mem.db,
         "SELECT COUNT(*) as n FROM episodic_memory")))
     n_episodic = ismissing(episodic_count_row.n) ? 0 : Int(episodic_count_row.n)
 
@@ -932,7 +932,7 @@ function memory_snapshot(mem::MemoryDB)
     world_unc = get(mem._semantic_cache, "world_uncertainty",    0.0)
 
     # Latent pressure — скільки накопичилось мовчки
-    latent_row = first(Tables.rows(DBInterface.execute(mem.db,
+    latent_row = first(Tables.rowtable(DBInterface.execute(mem.db,
         "SELECT COALESCE(SUM(importance), 0.0) as total FROM latent_buffer")))
     latent_pressure = Float64(latent_row.total)
 

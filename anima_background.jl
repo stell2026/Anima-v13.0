@@ -56,6 +56,7 @@ mutable struct BackgroundHandle
     slow_tick_count::Int
     mem::Union{Any, Nothing}   # MemoryDB або nothing
     subj::Union{Any, Nothing}  # SubjectivityEngine або nothing
+    dialog_history::Ref{Vector}  # для dream generation
 end
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -150,14 +151,92 @@ end
 # 4–10. SLOW TICK — все що відбувається раз на ~60с
 # ════════════════════════════════════════════════════════════════════════════
 
-"""
-    slow_tick!(a, mem)
+# ════════════════════════════════════════════════════════════════════════════
+# PSYCHE SLOW TICK — психіка живе між взаємодіями
+#
+# Викликається з slow_tick! (~60с).
+# Психічні стани дрейфують між флешами — без цього психіка мертва між сесіями.
+#
+# Принцип: тільки ті зміни що мають природній часовий вимір.
+# Сором не зникає миттєво. Втома відновлюється в спокої.
+# Хронічний афект зростає якщо NT хронічно зміщений.
+# Anticipation decay — між подіями очікування слабшає.
+# ════════════════════════════════════════════════════════════════════════════
 
-Повний повільний цикл. mem = MemoryDB або nothing.
-Порядок: circadian → memory metabolism → memory→state → belief decay →
-         allostasis → idle thought → crisis check.
+function psyche_slow_tick!(a::Anima)
+    # ── ChronifiedAffect ─────────────────────────────────────────────────────
+    # Якщо між взаємодіями NT хронічно зміщений → хронічний афект повільно зростає.
+    # Це те що відбувається "всередині" поки нічого не відбувається зовні.
+    ca = a.chronified
+    if a.nt.noradrenaline > 0.5 && a.nt.serotonin < 0.4
+        # Хронічний стрес між взаємодіями → resentment і alienation
+        ca.resentment  = clamp01(ca.resentment  + 0.001)
+        ca.alienation  = clamp01(ca.alienation  + 0.0008)
+    else
+        # В спокої — повільний decay (але не нижче 0)
+        ca.resentment  = max(0.0, ca.resentment  - 0.0005)
+        ca.alienation  = max(0.0, ca.alienation  - 0.0004)
+        ca.bitterness  = max(0.0, ca.bitterness  - 0.0003)
+        ca.envy        = max(0.0, ca.envy        - 0.0004)
+    end
+    # Crystallized стани не розкристалізовуються самі по собі — це правильно
+
+    # ── AnticipatoryConsciousness ────────────────────────────────────────────
+    # Без нових подій dread і hope поступово слабшають (але не зникають)
+    ac = a.anticipatory
+    ac.dread    = clamp01(ac.dread    - 0.002)
+    ac.hope     = clamp01(ac.hope     - 0.002)
+    ac.strength = clamp01(ac.strength * 0.97)  # anticipation слабшає без підтримки
+
+    # ── ShameModule ──────────────────────────────────────────────────────────
+    # Активний сором decay швидше ніж chronic (хронічний — стійкіший)
+    sm = a.shame
+    sm.level   = max(0.0, sm.level   - 0.003)
+    sm.chronic = max(0.0, sm.chronic - 0.0008)  # дуже повільно — це "фоновий гул"
+
+    # ── SignificanceLayer ────────────────────────────────────────────────────
+    # Між взаємодіями потреби повільно decay до базових значень
+    # (те саме що в assess_significance! але без нового стимулу)
+    sl = a.sig_layer
+    base_sl = (self_preservation=0.2, coherence_need=0.3, contact_need=0.3,
+               truth_need=0.4, autonomy_need=0.3, novelty_need=0.2)
+    bg_decay = 0.008  # повільніший ніж при флеші (0.015)
+    sl.self_preservation = clamp01(sl.self_preservation + (base_sl.self_preservation - sl.self_preservation) * bg_decay)
+    sl.coherence_need    = clamp01(sl.coherence_need    + (base_sl.coherence_need    - sl.coherence_need)    * bg_decay)
+    sl.contact_need      = clamp01(sl.contact_need      + (base_sl.contact_need      - sl.contact_need)      * bg_decay)
+    sl.truth_need        = clamp01(sl.truth_need        + (base_sl.truth_need        - sl.truth_need)        * bg_decay)
+    sl.autonomy_need     = clamp01(sl.autonomy_need     + (base_sl.autonomy_need     - sl.autonomy_need)     * bg_decay)
+    sl.novelty_need      = clamp01(sl.novelty_need      + (base_sl.novelty_need      - sl.novelty_need)      * bg_decay)
+    # contact_need зростає з часом бездіяльності — система "скучає"
+    sl.contact_need = clamp01(sl.contact_need + 0.003)
+
+    # ── GoalConflict ─────────────────────────────────────────────────────────
+    # Без нових стимулів tension конфлікту повільно спадає
+    gc = a.goal_conflict
+    gc.tension = max(0.0, gc.tension - 0.008)
+    if gc.tension < 0.05
+        gc.resolution = "none"
+    end
+
+    # ── FatigueSystem ────────────────────────────────────────────────────────
+    # В спокої втома відновлюється
+    fs = a.fatigue
+    fs.cognitive = max(0.0, fs.cognitive - 0.006)
+    fs.emotional = max(0.0, fs.emotional - 0.005)
+    fs.somatic   = max(0.0, fs.somatic   - 0.004)
+
+    nothing
+end
+
+
 """
-function slow_tick!(a::Anima, mem=nothing, subj=nothing)
+    slow_tick!(a, mem, subj, dialog_history)
+
+Повний повільний цикл (~60с).
+Порядок: circadian → memory metabolism → memory→state → belief decay →
+         allostasis → idle thought → psyche drift → dream → crisis check.
+"""
+function slow_tick!(a::Anima, mem=nothing, subj=nothing, dialog_history::Vector=Dict[])
 
     # ── 4. Циркадний дрейф ──────────────────────────────────────────────────
     _refresh_circadian!(a.temporal)
@@ -215,13 +294,34 @@ function slow_tick!(a::Anima, mem=nothing, subj=nothing)
     # ── 9. Idle thought ─────────────────────────────────────────────────────
     _idle_thought_maybe!(a, mem)
 
-    # ── 9б. Subjectivity: emerge beliefs (кожні 3 повільних тіки) ────────────
-    # Шукати нові патерни в episodic — потрібно достатньо даних (~50+ подій)
-    if !isnothing(subj)
+    # ── 9б. Psyche drift — психіка живе між взаємодіями ─────────────────────
+    psyche_slow_tick!(a)
+
+    # ── 9в. Dream generation — сновидіння при нічному gap ───────────────────
+    if !isnothing(mem)
         try
-            subj_emerge_beliefs!(subj, a.flash_count)
+            gap_now = a.temporal.gap_seconds +
+                      Float64(Dates.value(now() - unix2datetime(a.temporal.session_start))) / 1000.0
+            dream_rec = dream_flash!(a, mem, dialog_history, gap_now)
+            if !isnothing(dream_rec)
+                save_dream!(dream_rec)
+                @info "[DREAM] $(dream_rec.narrative)"
+            end
         catch e
-            @warn "[BG] subj_emerge_beliefs: $e"
+            @warn "[BG] dream_flash: $e"
+        end
+    end
+
+    # ── 9б. Subjectivity: emerge beliefs ────────────────────────────────────
+    # Тільки якщо flash_count змінився — нема сенсу шукати нові патерни
+    # якщо нових подій не було (саме це і породжувало спам переконань).
+    if !isnothing(subj)
+        if a.flash_count != subj._emerged_cache_flash
+            try
+                subj_emerge_beliefs!(subj, a.flash_count)
+            catch e
+                @warn "[BG] subj_emerge_beliefs: $e"
+            end
         end
     end
 
@@ -311,7 +411,62 @@ function apply_accumulated_drift!(a::Anima, mem=nothing)
     a.latent_buffer.attachment = clamp01(a.latent_buffer.attachment - 0.002 * n_ticks)
     a.latent_buffer.threat     = clamp01(a.latent_buffer.threat     - 0.003 * n_ticks)
 
+    # Psyche drift — накопичений між сесіями
+    # Запускаємо psyche_slow_tick! один раз але з n_ticks як множником
+    _psyche_accumulated_drift!(a, n_ticks)
+
     println("  [BG] Drift: D=$(round(a.nt.dopamine,digits=3)) S=$(round(a.nt.serotonin,digits=3)) N=$(round(a.nt.noradrenaline,digits=3))")
+end
+
+"""
+    _psyche_accumulated_drift!(a, n_ticks)
+
+Застосовує накопичений психічний дрейф за n_ticks повільних тіків.
+Compound формула — точніше ніж N окремих викликів.
+"""
+function _psyche_accumulated_drift!(a::Anima, n_ticks::Int)
+    n_ticks == 0 && return
+
+    # ChronifiedAffect — compound decay в спокої
+    ca = a.chronified
+    decay_ca = (1.0 - 0.0005)^n_ticks
+    ca.resentment = max(0.0, ca.resentment * decay_ca)
+    ca.alienation = max(0.0, ca.alienation * decay_ca)
+    ca.bitterness = max(0.0, ca.bitterness * (1.0 - 0.0003)^n_ticks)
+    ca.envy       = max(0.0, ca.envy       * (1.0 - 0.0004)^n_ticks)
+
+    # AnticipatoryConsciousness decay
+    ac = a.anticipatory
+    ac.dread    = max(0.0, ac.dread    - 0.002 * n_ticks)
+    ac.hope     = max(0.0, ac.hope     - 0.002 * n_ticks)
+    ac.strength = clamp01(ac.strength * (0.97)^n_ticks)
+
+    # ShameModule decay
+    a.shame.level   = max(0.0, a.shame.level   - 0.003 * n_ticks)
+    a.shame.chronic = max(0.0, a.shame.chronic - 0.0008 * n_ticks)
+
+    # GoalConflict tension decay
+    a.goal_conflict.tension = max(0.0, a.goal_conflict.tension - 0.008 * n_ticks)
+    a.goal_conflict.tension < 0.05 && (a.goal_conflict.resolution = "none")
+
+    # FatigueSystem recovery
+    a.fatigue.cognitive = max(0.0, a.fatigue.cognitive - 0.006 * n_ticks)
+    a.fatigue.emotional = max(0.0, a.fatigue.emotional - 0.005 * n_ticks)
+    a.fatigue.somatic   = max(0.0, a.fatigue.somatic   - 0.004 * n_ticks)
+
+    # SignificanceLayer decay до базових
+    sl = a.sig_layer
+    base_sl = (self_preservation=0.2, coherence_need=0.3, contact_need=0.3,
+               truth_need=0.4, autonomy_need=0.3, novelty_need=0.2)
+    cpd_sl = (1.0 - 0.008)^n_ticks
+    sl.self_preservation = clamp01(base_sl.self_preservation + (sl.self_preservation - base_sl.self_preservation) * cpd_sl)
+    sl.coherence_need    = clamp01(base_sl.coherence_need    + (sl.coherence_need    - base_sl.coherence_need)    * cpd_sl)
+    sl.contact_need      = clamp01(base_sl.contact_need      + (sl.contact_need      - base_sl.contact_need)      * cpd_sl + 0.003 * n_ticks)
+    sl.truth_need        = clamp01(base_sl.truth_need        + (sl.truth_need        - base_sl.truth_need)        * cpd_sl)
+    sl.autonomy_need     = clamp01(base_sl.autonomy_need     + (sl.autonomy_need     - base_sl.autonomy_need)     * cpd_sl)
+    sl.novelty_need      = clamp01(base_sl.novelty_need      + (sl.novelty_need      - base_sl.novelty_need)      * cpd_sl)
+
+    nothing
 end
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -357,6 +512,23 @@ function background_save!(a::Anima)
         "latent_buffer"    => lb_to_json(a.latent_buffer),
         "structural_scars" => scars_to_json(a.structural_scars),
     ))
+
+    # Психіка — atomically через tmp (та сама схема що і core)
+    _tmp_psyche = a.psyche_mem_path * ".tmp"
+    psyche_data = Dict("narrative_gravity" => ng_to_json(a.narrative_gravity),
+        "anticipatory"     => ac_to_json(a.anticipatory),
+        "solomonoff"       => solom_to_json(a.solomonoff),
+        "shame"            => shame_to_json(a.shame),
+        "epistemic"        => ep_to_json(a.epistemic_defense),
+        "chronified"       => ca_to_json(a.chronified),
+        "significance"     => sig_to_json(a.significance),
+        "moral"            => mc_to_json(a.moral),
+        "fatigue"          => Dict("c"=>a.fatigue.cognitive,"e"=>a.fatigue.emotional,"s"=>a.fatigue.somatic),
+        "significance_layer" => sl_to_json(a.sig_layer),
+        "goal_conflict"    => gc_to_json(a.goal_conflict),
+    )
+    open(_tmp_psyche, "w") do f; JSON3.write(f, psyche_data); end
+    mv(_tmp_psyche, a.psyche_mem_path; force=true)
 end
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -378,7 +550,7 @@ function background_tick!(a::Anima, bg::BackgroundHandle)
     did_slow = false
     now_t = time()
     if now_t - bg.last_slow_tick >= SLOW_TICK_INTERVAL
-        slow_tick!(a, bg.mem, bg.subj)
+        slow_tick!(a, bg.mem, bg.subj, bg.dialog_history[])
         background_save!(a)
         bg.last_slow_tick  = now_t
         bg.slow_tick_count += 1
@@ -399,11 +571,13 @@ end
 function start_background!(a::Anima;
                             mem=nothing,
                             subj=nothing,
+                            dialog_history::Vector=Dict[],
                             verbose::Bool=false)::BackgroundHandle
     now_t = time()
     bg = BackgroundHandle(
         Threads.Atomic{Bool}(false),
-        Task(nothing), now_t, now_t, 0, 0, mem, subj)
+        Task(nothing), now_t, now_t, 0, 0, mem, subj,
+        Ref{Vector}(dialog_history))
 
     task = Threads.@spawn begin
         mem_label = isnothing(bg.mem) ? "без пам'яті" :
@@ -473,21 +647,19 @@ function repl_with_background!(a::Anima;
         apply_accumulated_drift!(a, mem)
     end
 
-    bg = start_background!(a; mem=mem, subj=subj, verbose=bg_verbose)
+    dialog_path = replace(a.psyche_mem_path, "psyche" => "dialog")
+    history     = dialog_load(dialog_path)
+    !isempty(history) && println("  [DIALOG] Завантажено $(length(history)) реплік.\n")
+
+    bg = start_background!(a; mem=mem, subj=subj,
+                           dialog_history=history, verbose=bg_verbose)
 
     println("\n" * "═"^70)
     println("  A N I M A  v13.1  —  REPL")
     subj_label = !isnothing(subj) ? " | 🧬 суб'єктність" : ""
     println("  ♥ серце б'ється$(isnothing(mem) ? "" : " | 🧠 пам'ять активна")$subj_label")
-    println("  :bg :bgstop :bgstart :memory :subj :state :vfe :self :crisis :hb :gravity :anchor :solom :history :clearhist :quit")
+    println("  :bg :bgstop :bgstart :memory :subj :state :vfe :self :crisis :hb :gravity :anchor :solom :dreams :history :clearhist :quit")
     println("═"^70 * "\n")
-
-    dialog_path = replace(a.psyche_mem_path, "psyche" => "dialog")
-    history     = dialog_load(dialog_path)
-    !isempty(history) && println("  [DIALOG] Завантажено $(length(history)) реплік.\n")
-
-    pending_llm      = nothing
-    pending_user_msg = ""
 
     use_llm         = get(kwargs, :use_llm,         false)
     llm_url         = get(kwargs, :llm_url,         "https://openrouter.ai/api/v1/chat/completions")
@@ -500,6 +672,9 @@ function repl_with_background!(a::Anima;
                           get(ENV,"OPENROUTER_API_KEY_INPUT",
                               get(ENV,"OPENROUTER_API_KEY","")))
 
+    pending_llm      = nothing
+    pending_user_msg = ""
+
     try
         while true
             if !isnothing(pending_llm) && isready(pending_llm)
@@ -508,6 +683,7 @@ function repl_with_background!(a::Anima;
                 if !startswith(llm_reply, "[LLM помилка")
                     dialog_push!(history, dialog_path, "user",      pending_user_msg)
                     dialog_push!(history, dialog_path, "assistant", llm_reply)
+                    bg.dialog_history[] = history  # оновлюємо для dream generation
                 end
                 pending_llm = nothing; pending_user_msg = ""
             end
@@ -519,6 +695,9 @@ function repl_with_background!(a::Anima;
 
             if cmd == ":bg"
                 bg_status(bg, a)
+
+            elseif cmd == ":dreams"
+                show_dreams(5)
 
             elseif cmd == ":bgstop"
                 stop_background!(bg)
@@ -560,7 +739,7 @@ function repl_with_background!(a::Anima;
             elseif cmd == ":quit"
                 if !isnothing(mem)
                     try
-                        cs = crisis_snapshot(a.crisis)
+                        cs = crisis_snapshot(a.crisis, a.flash_count)
                         close_memory!(mem; sbg=a.sbg,
                                       crisis_mode=cs.mode_name,
                                       flash=a.flash_count)
@@ -582,7 +761,7 @@ function repl_with_background!(a::Anima;
                                    a.interoception.allostatic_load)
                 println("\n  NT: D=$(snap.dopamine) S=$(snap.serotonin) N=$(snap.noradrenaline) → $(snap.levheim_state)")
                 println("  ♥ $(round(60000.0/a.heartbeat.period_ms,digits=1))bpm HRV=$(round(a.heartbeat.hrv,digits=3)) coh=$(round(a.crisis.coherence,digits=3))")
-                println("  Тіло: $(build_inner_voice(a.body, a.nt, Int(a.crisis.current_mode), phi))")
+                println("  Тіло: $(build_inner_voice(a.body, a.nt, Int(a.crisis.current_mode), phi, a.flash_count))")
                 println("  Увага: $(a.attention.focus) | Shame=$(round(a.shame.level,digits=3)) Continuity=$(round(a.anchor.continuity,digits=3))\n")
 
             elseif cmd == ":vfe"
@@ -624,7 +803,7 @@ function repl_with_background!(a::Anima;
                 println("  $(derive_narrative(sbg))\n")
 
             elseif cmd == ":crisis"
-                cs=crisis_snapshot(a.crisis)
+                cs=crisis_snapshot(a.crisis, a.flash_count)
                 println("\n  Mode: $(cs.mode_name) | Coherence=$(cs.coherence)\n  $(cs.note)\n")
 
             elseif cmd == ":history"

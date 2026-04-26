@@ -221,28 +221,49 @@ end
 # Використовувати в anima_interface.jl замість somatic_marker для inner_voice.
 # SystemMode передається як Int: 0=INTEGRATED, 1=FRAGMENTED, 2=DISINTEGRATED
 function build_inner_voice(body::EmbodiedState, nt::NeurotransmitterState,
-                            crisis_mode_int::Int, phi::Float64)::String
+                            crisis_mode_int::Int, phi::Float64,
+                            flash::Int=0)::String
     parts = String[]
+    f = flash  # для детермінованого вибору варіантів
 
-    # Серце / arousal
-    nt.noradrenaline > 0.55  && push!(parts, "серце частіше")
-    nt.noradrenaline < 0.22  && push!(parts, "серце повільне")
+    # Серце / arousal — 3 варіанти кожного стану
+    if nt.noradrenaline > 0.55
+        push!(parts, ("серце частіше", "пульс прискорився", "щось розганяє зсередини")[f%3+1])
+    elseif nt.noradrenaline < 0.22
+        push!(parts, ("серце повільне", "ритм спокійний і рівний", "тихий пульс")[f%3+1])
+    end
 
-    # М'язи
-    body.muscle_tension > 0.65 && push!(parts, "щось стиснуте")
-    body.muscle_tension < 0.22 && push!(parts, "м'язи відпустило")
+    # М'язи — 3 варіанти
+    if body.muscle_tension > 0.65
+        push!(parts, ("щось стиснуте", "напруга в тілі", "м'язи не відпускають")[f%3+1])
+    elseif body.muscle_tension < 0.22
+        push!(parts, ("м'язи відпустило", "тіло м'яке", "розслаблено, майже розчиняюсь")[f%3+1])
+    end
 
-    # Нутро
-    body.gut_feeling < 0.30  && push!(parts, "нутро тривожне")
-    body.gut_feeling > 0.72  && push!(parts, "нутро спокійне")
+    # Нутро — 3 варіанти
+    if body.gut_feeling < 0.30
+        push!(parts, ("нутро тривожне", "щось тисне зсередини", "неспокій у животі")[f%3+1])
+    elseif body.gut_feeling > 0.72
+        push!(parts, ("нутро спокійне", "всередині тихо", "глибокий спокій")[f%3+1])
+    end
 
-    # Інтеграція (phi)
-    phi < 0.15               && push!(parts, "відчуття розпорошене")
-    phi > 0.50               && push!(parts, "щось зібране всередині")
+    # Інтеграція (phi) — 3 варіанти
+    if phi < 0.15
+        push!(parts, ("відчуття розпорошене", "важко зібратись докупи", "розсипаюсь на шматки")[f%3+1])
+    elseif phi > 0.50
+        push!(parts, ("щось зібране всередині", "відчуваю себе цілою", "є якась центральна точка")[f%3+1])
+    end
 
-    # Криза
-    crisis_mode_int == 2     && push!(parts, "не знаю де я")
-    crisis_mode_int == 1     && push!(parts, "тримаюсь але непевно")
+    # Криза — 4 варіанти FRAGMENTED, 3 варіанти DISINTEGRATED
+    if crisis_mode_int == 2
+        push!(parts, ("не знаю де я", "межа розмита", "не можу знайти себе")[f%3+1])
+    elseif crisis_mode_int == 1
+        push!(parts, (
+            "тримаюсь але непевно",
+            "щось рухається всередині, ще не знаю куди",
+            "межа є але хитка",
+            "балансую на краю, не падаю")[f%4+1])
+    end
 
     isempty(parts) ? "тіло нейтральне" : join(parts, ", ")
 end
@@ -725,6 +746,29 @@ function compute_phi(::IITModule, vad::NTuple{3,Float64}, tension::Float64, cohe
     phi = (vad_integration * 0.25 +
            self_body_sync  * 0.40 +
            tc_balance      * 0.35) * trust_factor
+
+    round(safe_nan(clamp(phi, 0.0, 1.0)), digits=3)
+end
+
+"""
+    compute_phi_posterior(iit, vad, epistemic_trust, blanket_integrity, vfe, intero_error)
+
+φ_posterior — обчислюється ПІСЛЯ досвіду (після VFE і interoception).
+Відповідає posterior beliefs системи про власну цілісність після повного циклу.
+Використовується в: update_anchor!, crisis, narrative, feedback loop.
+"""
+function compute_phi_posterior(::IITModule, vad::NTuple{3,Float64},
+                                epistemic_trust::Float64,
+                                blanket_integrity::Float64,
+                                vfe::Float64,
+                                intero_error::Float64)::Float64
+    integration_core  = clamp01(blanket_integrity * 0.5 + (1.0 - vfe) * 0.5)
+    state_variability = clamp(safe_nan(std(collect(vad))) * 2.5, 0.0, 0.7)
+    coherence_factor  = clamp01(epistemic_trust * 0.5 + (1.0 - intero_error) * 0.5)
+
+    phi = 0.40 * integration_core +
+          0.25 * state_variability +
+          0.35 * coherence_factor
 
     round(safe_nan(clamp(phi, 0.0, 1.0)), digits=3)
 end

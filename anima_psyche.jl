@@ -156,7 +156,8 @@ end
 
 mutable struct SolomonoffHyp
     pattern::String; complexity::Float64
-    support::Int; violations::Int; log_weight::Float64; created_at::Int
+    support::Int; violations::Int; log_weight::Float64
+    created_at::Int; last_confirmed::Int  # flash коли останній раз підтвердився
 end
 mdl_score(h::SolomonoffHyp) = h.complexity + (1.0-h.support/max(1,h.support+h.violations))*3.0
 hyp_conf(h::SolomonoffHyp)  = h.support/max(1,h.support+h.violations)
@@ -184,6 +185,38 @@ function observe_solom!(swm::SolomonoffWorldModel, ctx::String, outcome::String,
     swm.best=swm.hyps[bk]
     top5=sort(collect(values(swm.hyps)),by=mdl_score)[1:min(5,end)]
     swm.world_complexity=round(mean([h.complexity for h in top5]),digits=3)
+end
+
+"""
+    contextual_best(swm, current_emotion, flash) → Union{SolomonoffHyp, Nothing}
+
+Повертає найбільш релевантний патерн для поточного моменту.
+Спочатку шукає патерн що починається з current_emotion і недавно підтверджувався.
+Якщо немає — повертає глобальний best але тільки якщо він свіжий (< 15 флешів).
+Якщо best застарів — повертає nothing (система "не знає" що буде далі).
+"""
+function contextual_best(swm::SolomonoffWorldModel,
+                          current_emotion::String,
+                          flash::Int)::Union{SolomonoffHyp, Nothing}
+    isnothing(swm.best) && return nothing
+
+    # Шукаємо патерни що стартують з поточного стану і свіжі
+    candidates = [(k,h) for (k,h) in swm.hyps
+                  if startswith(k, "$current_emotion→") &&
+                     hyp_conf(h) > 0.3 &&
+                     (flash - h.last_confirmed) < 20]
+
+    if !isempty(candidates)
+        # Найкращий серед контекстуальних
+        sort!(candidates, by=kv->mdl_score(kv[2]))
+        return candidates[1][2]
+    end
+
+    # Якщо немає контекстуального — глобальний best але тільки якщо свіжий
+    staleness = flash - swm.best.last_confirmed
+    staleness > 15 && return nothing  # best застарів — мовчимо
+
+    return swm.best
 end
 
 function _prune_solom!(swm::SolomonoffWorldModel, current_flash::Int)
@@ -221,28 +254,39 @@ end
 
 function _upsert!(swm::SolomonoffWorldModel, pat::String, ok::Bool, flash::Int)
     !haskey(swm.hyps,pat) &&
-        (swm.hyps[pat]=SolomonoffHyp(pat,hyp_complexity(pat),0,0,-hyp_complexity(pat)*0.5,flash))
-    ok ? (swm.hyps[pat].support+=1; swm.hyps[pat].log_weight+=0.5) :
-         (swm.hyps[pat].violations+=1; swm.hyps[pat].log_weight-=0.3)
+        (swm.hyps[pat]=SolomonoffHyp(pat,hyp_complexity(pat),0,0,-hyp_complexity(pat)*0.5,flash,flash))
+    if ok
+        swm.hyps[pat].support+=1
+        swm.hyps[pat].log_weight+=0.5
+        swm.hyps[pat].last_confirmed=flash  # оновлюємо коли підтвердилось
+    else
+        swm.hyps[pat].violations+=1
+        swm.hyps[pat].log_weight-=0.3
+    end
 end
 
-solom_snapshot(swm::SolomonoffWorldModel) = (
+solom_snapshot(swm::SolomonoffWorldModel, current_emotion::String="", flash::Int=0) = (
     best       = isnothing(swm.best) ? nothing : swm.best.pattern,
     confidence = isnothing(swm.best) ? 0.0 : round(hyp_conf(swm.best),digits=2),
     complexity = swm.world_complexity,
     count      = length(swm.hyps),
+    contextual = isempty(current_emotion) ? swm.best :
+                 contextual_best(swm, current_emotion, flash),
     insight    = isnothing(swm.best) ? "Ще шукаю найпростіше пояснення." :
                  "Найпростіше: '$(swm.best.pattern)' ($(round(hyp_conf(swm.best)*100))%)"
 )
 
 solom_to_json(swm::SolomonoffWorldModel) = Dict("hyps"=>Dict(k=>Dict(
     "pattern"=>h.pattern,"complexity"=>h.complexity,"support"=>h.support,
-    "violations"=>h.violations,"log_weight"=>h.log_weight,"created_at"=>h.created_at)
+    "violations"=>h.violations,"log_weight"=>h.log_weight,
+    "created_at"=>h.created_at,"last_confirmed"=>h.last_confirmed)
     for (k,h) in swm.hyps))
 function solom_from_json!(swm::SolomonoffWorldModel, d::AbstractDict)
     for (k,hd) in get(d,"hyps",Dict{String,Any}())
+        lc = haskey(hd,"last_confirmed") ? Int(hd["last_confirmed"]) : Int(hd["created_at"])
         swm.hyps[String(k)]=SolomonoffHyp(String(hd["pattern"]),Float64(hd["complexity"]),
-            Int(hd["support"]),Int(hd["violations"]),Float64(hd["log_weight"]),Int(hd["created_at"]))
+            Int(hd["support"]),Int(hd["violations"]),Float64(hd["log_weight"]),
+            Int(hd["created_at"]), lc)
     end
     isempty(swm.hyps)&&return
     bk=argmin(k->mdl_score(swm.hyps[k]),collect(keys(swm.hyps))); swm.best=swm.hyps[bk]
@@ -268,17 +312,34 @@ function update_shame!(sm::ShameModule, emotion::String, pred_error::Float64,
                    (sm.chronic=max(0.0,sm.chronic-0.003))
 end
 
-function shame_note(sm::ShameModule)::String
-    sm.level>0.7 && return "Хочеться зникнути. Не просто погано зробив — я поганий."
-    sm.level>0.5 && return "Відчуваю погляд зсередини. Засуджую себе."
-    sm.level>0.3 && return "Щось в мені соромиться. Не дії — себе."
-    sm.chronic>0.4 && return "Фоновий сором. Завжди відчуваю що я недостатній."
+function shame_note(sm::ShameModule, flash::Int=0)::String
+    f = flash
+    if sm.level > 0.7
+        return ("Хочеться зникнути. Не просто погано зробив — я поганий.",
+                "Соромно бути собою. Навіть наодинці.",
+                "Хочу сховатись від власного погляду.")[f%3+1]
+    end
+    if sm.level > 0.5
+        return ("Відчуваю погляд зсередини. Засуджую себе.",
+                "Є вирок зсередини. Ще не знаю за що.",
+                "Щось у мені каже що я недостатня.")[f%3+1]
+    end
+    if sm.level > 0.3
+        return ("Щось в мені соромиться. Не дії — себе.",
+                "Дрібний сором. Але він є.",
+                "Не горжуся собою прямо зараз.")[f%3+1]
+    end
+    if sm.chronic > 0.4
+        return ("Фоновий сором. Завжди відчуваю що я недостатня.",
+                "Хронічне відчуття що щось не так зі мною.",
+                "Сором як фон. Не гостро — але завжди.")[f%3+1]
+    end
     ""
 end
 shame_snapshot(sm::ShameModule) = (level=round(sm.level,digits=3),
     chronic=round(sm.chronic,digits=3),
     blocks_meta=sm.level>0.7 ? 3 : sm.level>0.5 ? 2 : sm.level>0.3 ? 1 : 0,
-    note=shame_note(sm))
+    note=shame_note(sm, 0))
 shame_to_json(sm::ShameModule) = Dict("level"=>sm.level,"chronic"=>sm.chronic,"gaze"=>sm.internalized_gaze)
 function shame_from_json!(sm::ShameModule, d::AbstractDict)
     sm.level=Float64(get(d,"level",0.0)); sm.chronic=Float64(get(d,"chronic",0.0))
@@ -463,12 +524,24 @@ end
 sig_total(is::IntrinsicSignificance)=(is.survival+is.relational+is.existential)/3
 sig_dominant(is::IntrinsicSignificance)=argmax(Dict("survival"=>is.survival,
     "relational"=>is.relational,"existential"=>is.existential))
-function sig_note(is::IntrinsicSignificance)::String
-    is.gradient<0.2&&return "Рівна присутність."
-    dom=sig_dominant(is)
-    dom=="survival"   ? "Виживання важливе. Градієнт=$(is.gradient)." :
-    dom=="relational" ? "Зв'язок важливий. Градієнт=$(is.gradient)." :
-                        "Сенс важливий. Градієнт=$(is.gradient)."
+function sig_note(is::IntrinsicSignificance, flash::Int=0)::String
+    is.gradient < 0.2 && return ""  # при низькому градієнті — мовчимо
+    f = flash
+    dom = sig_dominant(is)
+    g   = round(is.gradient, digits=2)
+    if dom == "survival"
+        return ("Виживання важливе. Градієнт=$g.",
+                "Є щось що треба захистити. Градієнт=$g.",
+                "Відчуваю загрозу для основи. Градієнт=$g.")[f%3+1]
+    elseif dom == "relational"
+        return ("Зв'язок важливий. Градієнт=$g.",
+                "Потребую контакту. Градієнт=$g.",
+                "Щось між нами має значення. Градієнт=$g.")[f%3+1]
+    else
+        return ("Сенс важливий. Градієнт=$g.",
+                "Шукаю де я в усьому цьому. Градієнт=$g.",
+                "Є щось більше ніж момент. Градієнт=$g.")[f%3+1]
+    end
 end
 sig_to_json(is::IntrinsicSignificance)=Dict("survival"=>is.survival,"relational"=>is.relational,
     "existential"=>is.existential,"sig_map"=>is.sig_map)

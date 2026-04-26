@@ -1,6 +1,7 @@
 include("anima_interface.jl")
 include("anima_memory_db.jl")
 include("anima_subjectivity.jl")
+include("anima_dream.jl")
 include("anima_background.jl")
 
 anima = Anima()

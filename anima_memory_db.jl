@@ -40,7 +40,7 @@ const MEM_IMPORTANCE_THRESHOLD  = 0.20  # нижче — не зберігати
 const MEM_CORE_MAX              = 500   # максимум записів в episodic
 const MEM_DECAY_RATE            = 0.001 # за один decay-тік (~60с)
 const MEM_MIN_WEIGHT            = 0.05  # нижче — видалити з episodic
-const MEM_CONSOLIDATE_THRESHOLD = 0.55  # weight для консолідації в semantic
+const MEM_CONSOLIDATE_THRESHOLD = 0.35  # weight для консолідації в semantic
 const MEM_TOPK_INFLUENCE        = 10    # скільки найсильніших подій впливають на стан
 const MEM_AFFECT_DECAY          = 0.995 # decay affect за тік (~60с) — стрес зникає
 const MEM_LINK_SIMILARITY_THR   = 0.75  # поріг схожості для створення зв'язку
@@ -316,6 +316,35 @@ function memory_write_event!(mem::MemoryDB,
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (flash, ts, emotion, arousal, valence,
           prediction_error, self_impact, tension, phi, imp, resistance, signature))
+
+    # ── Incremental affect update — кожна подія одразу формує фон ───────
+    # Не чекаємо consolidation — affect накопичується з кожного досвіду.
+    # Малий крок (0.003–0.006) — багато подій потрібно щоб помітно змінити фон.
+    # Це чесніше: система відчуває напругу від кожного моменту, не тільки від "важких".
+
+    # Стрес: tension вище норми + arousal вище норми
+    # Поріг знижено з 0.4 до 0.3 — при типовому tension 0.30-0.45
+    # stress майже не накопичувався. Тепер накопичується з помірних станів.
+    stress_inc = clamp((tension - 0.3) * 0.4 + (arousal - 0.3) * 0.4, 0.0, 1.0)
+    if stress_inc > 0.0
+        _upsert_affect!(mem.db, "stress",
+            stress_inc * imp * 0.005, 0.0, 1.0)
+    end
+
+    # Тривога: негативна валентність + prediction_error
+    if valence < -0.1 && prediction_error > 0.3
+        anxiety_inc = abs(valence) * prediction_error
+        _upsert_affect!(mem.db, "anxiety",
+            anxiety_inc * imp * 0.004, 0.0, 1.0)
+    end
+
+    # Мотивація: позитивна валентність + phi — добрий досвід мотивує
+    if valence > 0.15 && phi > 0.2
+        _upsert_affect!(mem.db, "motivation_bias",
+            valence * phi * imp * 0.003, 0.0, 1.0)
+    end
+
+    mem._cache_dirty = true   # кеш потребує оновлення
 
     # ── Асоціативні зв'язки — знайти схожу подію і зв'язати ─────────────
     # Similarity = 1 - нормована евклідова відстань у просторі (arousal, valence, tension)
@@ -717,10 +746,9 @@ function _memory_consolidate!(mem::MemoryDB)
         avg_phi     = sum_phi     * inv_w
 
         # ── Bayesian-style semantic update ───────────────────────────────────
-        # Логіка: не "if > threshold" а proportional update зважений на evidence.
-        # Чим більше підтверджень і чим вони сильніші — тим більший зсув.
-        # Формула: delta = evidence_strength * learning_rate * n_evidence_factor
-        # n_evidence_factor = sqrt(n/10) — більше подій = впевненіший висновок
+        # Affect тепер накопичується incremental в memory_write_event!
+        # Тут — тільки semantic beliefs що потребують агрегації по багатьох подіях.
+        # Логіка: not "if > threshold" а proportional update зважений на evidence.
 
         evidence_factor = clamp(sqrt(n / 10.0), 0.3, 2.0)
 
@@ -754,34 +782,12 @@ function _memory_consolidate!(mem::MemoryDB)
                 0.0, 1.0, "consolidated")
         end
 
-        # ── Affect update (rolling, не threshold) ────────────────────────────
-        # Стрес: зважений від tension + arousal (обидва мають бути вище норми)
-        stress_signal = clamp((avg_tension - 0.4) * 0.5 +
-                               (avg_arousal - 0.4) * 0.5, 0.0, 1.0)
-        if stress_signal > 0.0
-            _upsert_affect!(mem.db, "stress",
-                stress_signal * 0.006 * evidence_factor, 0.0, 1.0)
-        end
-
-        # Тривога: негативна валентність + висока pe
-        if avg_valence < -0.1 && avg_pe > 0.4
-            anxiety_signal = abs(avg_valence) * avg_pe
-            _upsert_affect!(mem.db, "anxiety",
-                anxiety_signal * 0.005 * evidence_factor, 0.0, 1.0)
-        end
-
-        # Мотивація: позитивна валентність + phi (інтеграція)
-        if avg_valence > 0.2 && avg_phi > 0.25
-            _upsert_affect!(mem.db, "motivation_bias",
-                avg_valence * avg_phi * 0.004 * evidence_factor, 0.0, 1.0)
-        end
-
-        # Образа (resentment): висока tension + негативна валентність тривалий час
-        if avg_tension > 0.55 && avg_valence < -0.2 && n >= 5
-            _upsert_affect!(mem.db, "resentment",
-                (avg_tension + abs(avg_valence)) * 0.003 * evidence_factor,
-                0.0, 1.0)
-        end
+        # ── Affect decay (повільний — фон зникає з часом) ────────────────────
+        # Affect накопичується в write_event!, тут тільки decay через consolidation тік.
+        # Не видаляємо з _memory_decay! — тут додатковий повільний decay.
+        DBInterface.execute(mem.db, """
+        UPDATE affect_state SET value = value * 0.997 WHERE value > 0.005
+        """)
 
         # ── Latent buffer release ─────────────────────────────────────────────
         latent_rows = Tables.rowtable(DBInterface.execute(mem.db, """

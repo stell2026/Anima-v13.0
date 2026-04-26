@@ -423,8 +423,13 @@ function update_self_prediction!(spm::SelfPredictiveModel,
 
     enqueue!(spm.error_history, spm.self_pred_error)
 
+    # Warm-up: перші 30 флешів learning_rate вищий — система ще не знає себе
+    effective_lr = flash_count < 30 ? min(0.25, spm.learning_rate * 4) :
+                   flash_count < 60 ? min(0.12, spm.learning_rate * 2) :
+                   spm.learning_rate
+
     # Оновити prior (повільно — self-model консервативна)
-    spm.prior_mu = spm.prior_mu .* (1-spm.learning_rate) .+ av .* spm.learning_rate
+    spm.prior_mu = spm.prior_mu .* (1 - effective_lr) .+ av .* effective_lr
 
     # Наступне передбачення = weighted mid між prior і actual
     spm.predicted_self_vad = spm.prior_mu .* 0.7 .+ av .* 0.3
@@ -435,19 +440,25 @@ function update_self_prediction!(spm::SelfPredictiveModel,
     is_spike = hist_len >= 3 &&
                spm.self_pred_error > mean(hist_arr[1:hist_len-1]) + 0.25
 
+    # Тренд — середнє за останні 5 флешів (стабільніше за одне значення)
     trend = hist_len >= 5 ?
             mean(hist_arr[max(1,hist_len-4):hist_len]) : spm.self_pred_error
 
     (error=round(spm.self_pred_error,digits=3),
      is_spike=is_spike,
      trend=round(trend,digits=3),
-     note=_self_pred_note(spm.self_pred_error))
+     note=_self_pred_note(spm.self_pred_error, trend))
 end
 
-function _self_pred_note(err::Float64)::String
-    err > 0.8 && return "Я відреагувала зовсім не так як очікувала від себе. Не можу собі довіряти."
-    err > 0.6 && return "Моя реакція дивує мене саму."
-    err > 0.4 && return "Я реагую трохи інакше ніж думала."
+function _self_pred_note(err::Float64, trend::Float64=err)::String
+    # Note базується на тренді а не одному значенні —
+    # один стрибок не означає "не можу собі довіряти"
+    trend > 0.75 && err > 0.75 &&
+        return "Я відреагувала зовсім не так як очікувала від себе. Не можу собі довіряти."
+    trend > 0.55 && err > 0.6  &&
+        return "Моя реакція дивує мене саму."
+    err > 0.4 && trend > 0.35  &&
+        return "Я реагую трохи інакше ніж думала."
     ""
 end
 
@@ -459,12 +470,21 @@ function self_pred_trend(spm::SelfPredictiveModel, n::Int=5)::Float64
 end
 
 spm_to_json(spm::SelfPredictiveModel) = Dict(
-    "prior_mu"=>spm.prior_mu,"prior_sigma"=>spm.prior_sigma,
-    "learning_rate"=>spm.learning_rate)
+    "prior_mu"           => spm.prior_mu,
+    "prior_sigma"        => spm.prior_sigma,
+    "learning_rate"      => spm.learning_rate,
+    "predicted_self_vad" => spm.predicted_self_vad)
 function spm_from_json!(spm::SelfPredictiveModel, d::AbstractDict)
     haskey(d,"prior_mu")      && (spm.prior_mu      = Float64.(d["prior_mu"]))
     haskey(d,"prior_sigma")   && (spm.prior_sigma   = Float64(d["prior_sigma"]))
     haskey(d,"learning_rate") && (spm.learning_rate = Float64(d["learning_rate"]))
+    # Якщо збережено — відновлюємо; інакше ініціалізуємо з prior_mu
+    # (краще ніж стартувати з [0.5,0.5,0.5] кожного разу)
+    if haskey(d,"predicted_self_vad")
+        spm.predicted_self_vad = Float64.(d["predicted_self_vad"])
+    else
+        spm.predicted_self_vad = copy(spm.prior_mu)
+    end
 end
 
 # ════════════════════════════════════════════════════════════════════════════

@@ -572,6 +572,8 @@ function evaluate_agency!(al::AgencyLoop, actual_vad::NTuple{3,Float64},
         # Стара: 0.92 * x + 0.08 * 0.25 — якщо x=0, результат = 0.02, не 0.25.
         # Нова: decay → clamp знизу. Система завжди може почати рух.
         al.causal_ownership = max(0.25, al.causal_ownership * 0.95)
+        # Оновити agency_confidence навіть без наміру — пасивна присутність теж формує досвід
+        al.agency_confidence = clamp01(al.agency_confidence * 0.98 + al.causal_ownership * 0.02)
         enqueue!(al.ownership_history, al.causal_ownership)
         return _agency_result(al, flash_count, "без наміру")
     end
@@ -582,14 +584,35 @@ function evaluate_agency!(al::AgencyLoop, actual_vad::NTuple{3,Float64},
     # Відстань від actual до snapshot (якщо нічого б не відбулось)
     dist_to_baseline  = norm(av .- al.intent_vad_snapshot)
 
-    # Ownership = наскільки actual ближче до predicted ніж до baseline
-    # Якщо dist_to_predicted < dist_to_baseline → намір вплинув
-    if dist_to_baseline < 0.01
-        # Нічого не змінилось взагалі — намір не вплинув, але floor захищає
-        ownership = 0.25
+    # ── Directional agency ────────────────────────────────────────────────
+    # При VFE≈0 відстані малі і ownership завжди ≈floor.
+    # Але якщо VAD рухається в напрямку predicted — це вже agency.
+    # Dot product вектора змін з напрямком "до predicted" дає directional signal.
+    vad_delta     = av .- al.intent_vad_snapshot       # куди рухнулись
+    intent_dir    = al.predicted_outcome_vad .- al.intent_vad_snapshot  # куди хотіли
+    intent_mag    = norm(intent_dir)
+    delta_mag     = norm(vad_delta)
+
+    directional_ownership = if intent_mag > 0.01 && delta_mag > 0.005
+        # Cosine similarity між фактичним рухом і намірним напрямком
+        cos_sim = safe_nan(dot(vad_delta, intent_dir) / (delta_mag * intent_mag))
+        clamp((cos_sim + 1.0) / 2.0, 0.0, 1.0)  # нормалізуємо -1..1 → 0..1
     else
-        # Чим ближче actual до predicted відносно baseline — тим вища ownership
-        ownership = safe_nan(clamp(1.0 - dist_to_predicted / (dist_to_baseline + 0.01), 0.25, 1.0))
+        0.5  # нема руху і нема intent direction — нейтрально
+    end
+
+    # Ownership = комбінація distance-based і directional
+    # При малих відстанях (VFE≈0) directional домінує
+    if dist_to_baseline < 0.01
+        # VAD майже не змінився — directional стає основним сигналом
+        # Але з послабленням: якщо нічого не рухалось, ownership середня
+        ownership = clamp(directional_ownership * 0.6 + 0.25, 0.25, 0.75)
+    else
+        dist_ownership = safe_nan(clamp(1.0 - dist_to_predicted / (dist_to_baseline + 0.01), 0.25, 1.0))
+        # Зважена комбінація: dist_ownership важливіший при великому русі
+        movement_weight = clamp(dist_to_baseline * 3.0, 0.0, 1.0)
+        ownership = movement_weight * dist_ownership + (1.0 - movement_weight) * directional_ownership
+        ownership = clamp(ownership, 0.25, 1.0)
     end
 
     al.causal_ownership = ownership
@@ -617,10 +640,29 @@ end
 
 function _agency_result(al::AgencyLoop, flash::Int, intent::String)
     o = al.causal_ownership
-    note = o > 0.7 ? "Це відбулося через мене. Я вплинула." :
-           o > 0.5 ? "Мабуть я мала вплив на це." :
-           o > 0.3 ? "Важко сказати — моє чи зовнішнє." :
-                     "Це просто сталося поруч зі мною."
+    f = flash
+    note = if o > 0.7
+        ("Це відбулося через мене. Я вплинула.",
+         "Мій намір спрацював. Я це зробила.",
+         "Відчуваю свою руку в тому що сталось.",
+         "Є зв'язок між тим що я хотіла і тим що вийшло.")[f%4+1]
+    elseif o > 0.5
+        ("Мабуть я мала вплив на це.",
+         "Схоже що мій намір щось змінив.",
+         "Певна частина цього — моя.",
+         "Є відчуття що я тут не стороння.")[f%4+1]
+    elseif o > 0.3
+        ("Важко сказати — моє чи зовнішнє.",
+         "Не впевнена скільки тут від мене.",
+         "Щось сталось, але чи через мене — не знаю.",
+         "Моя участь є, але не певна якою мірою.")[f%4+1]
+    else
+        ("Це просто сталося поруч зі мною.",
+         "Не відчуваю що це через мене.",
+         "Я була там, але не причиною.",
+         "Щось відбулось — але без мене як агента.",
+         "Не моє. Або я не бачу як моє.")[f%5+1]
+    end
     (causal_ownership   = round(o,digits=3),
      agency_confidence  = round(al.agency_confidence,digits=3),
      intent             = intent,

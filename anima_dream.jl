@@ -46,7 +46,7 @@ struct DreamRecord
     flash_count    ::Int
     hour           ::Int
     gap_minutes    ::Float64
-    source_fragment::String   # уламок з dialog_history що послужив основою
+    source_fragment::String    # уламок з dialog_history що послужив основою
     emotion        ::String    # яка емоція виникла
     phi            ::Float64
     nt_delta       ::NTuple{3,Float64}  # D/S/N зсув від сну

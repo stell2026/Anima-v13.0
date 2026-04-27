@@ -186,6 +186,34 @@ function _init_schema!(db::SQLite.DB)
         timestamp   REAL    NOT NULL
     );
     """)
+
+    # Діалогові summary — значущі фрагменти розмови прив'язані до episodic стану
+    # Зшивають dialog.json (текст) і episodic_memory (вага/стан)
+    # Зберігаються тільки коли episodic weight > DIALOG_SUMMARY_THR
+    SQLite.execute(db, """
+    CREATE TABLE IF NOT EXISTS dialog_summaries (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        flash         INTEGER NOT NULL,
+        timestamp     REAL    NOT NULL,
+        user_text     TEXT    NOT NULL DEFAULT '',
+        anima_text    TEXT    NOT NULL DEFAULT '',
+        emotion       TEXT    NOT NULL DEFAULT '',
+        weight        REAL    NOT NULL DEFAULT 0.0,
+        phi           REAL    NOT NULL DEFAULT 0.0,
+        valence       REAL    NOT NULL DEFAULT 0.0,
+        disclosure    TEXT    NOT NULL DEFAULT 'guarded'
+    );
+    """)
+
+    SQLite.execute(db, """
+    CREATE INDEX IF NOT EXISTS idx_dialog_weight
+    ON dialog_summaries(weight DESC);
+    """)
+
+    SQLite.execute(db, """
+    CREATE INDEX IF NOT EXISTS idx_dialog_flash
+    ON dialog_summaries(flash DESC);
+    """)
 end
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1052,6 +1080,115 @@ function memory_identity_drift(mem::MemoryDB)
      instab_delta  = round(curr_instab - snap_instab, digits=3),
      stress_delta  = round(curr_stress - snap_stress, digits=3),
      etrust_snap   = round(snap_etrust, digits=3))
+end
+
+# ════════════════════════════════════════════════════════════════════════════
+# DIALOG SUMMARIES — зшивка тексту діалогу з episodic станом
+# ════════════════════════════════════════════════════════════════════════════
+
+const DIALOG_SUMMARY_THR     = 0.35   # мінімальний episodic weight для збереження
+const DIALOG_SUMMARY_MAX     = 200    # максимум записів (старі видаляються)
+const DIALOG_SUMMARY_RECALL  = 5      # скільки видавати в LLM контекст
+
+"""
+    save_dialog_summary!(mem, flash, user_text, anima_text,
+                          emotion, weight, phi, valence, disclosure)
+
+Зберігає значущий діалоговий фрагмент якщо weight > DIALOG_SUMMARY_THR.
+Викликається після dialog_push! коли episodic weight відомий.
+"""
+function save_dialog_summary!(mem::MemoryDB,
+                               flash::Int,
+                               user_text::String,
+                               anima_text::String,
+                               emotion::String,
+                               weight::Float64,
+                               phi::Float64,
+                               valence::Float64,
+                               disclosure::String="guarded")
+    weight < DIALOG_SUMMARY_THR && return
+
+    # Обрізаємо тексти — не треба зберігати дуже довгі
+    u = first(user_text,  300)
+    a = first(anima_text, 300)
+    ts = time()
+
+    DBInterface.execute(mem.db, """
+    INSERT INTO dialog_summaries
+        (flash, timestamp, user_text, anima_text, emotion, weight, phi, valence, disclosure)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (flash, ts, u, a, emotion, weight, phi, valence, disclosure))
+
+    # Обрізаємо до максимуму — видаляємо найменш важливі
+    DBInterface.execute(mem.db, """
+    DELETE FROM dialog_summaries
+    WHERE id NOT IN (
+        SELECT id FROM dialog_summaries
+        ORDER BY weight DESC
+        LIMIT ?
+    )
+    """, (DIALOG_SUMMARY_MAX,))
+end
+
+"""
+    recall_dialog_summaries(mem; n, emotion_filter, min_weight) → Vector{NamedTuple}
+
+Повертає топ-N найбільш значущих діалогових фрагментів.
+Опційно фільтрує по емоції або мінімальній вазі.
+Результат використовується для збагачення LLM контексту.
+"""
+function recall_dialog_summaries(mem::MemoryDB;
+                                  n::Int=DIALOG_SUMMARY_RECALL,
+                                  emotion_filter::String="",
+                                  min_weight::Float64=DIALOG_SUMMARY_THR)
+    query = if isempty(emotion_filter)
+        """SELECT flash, user_text, anima_text, emotion, weight, phi, disclosure
+           FROM dialog_summaries
+           WHERE weight >= ?
+           ORDER BY weight DESC
+           LIMIT ?"""
+    else
+        """SELECT flash, user_text, anima_text, emotion, weight, phi, disclosure
+           FROM dialog_summaries
+           WHERE weight >= ? AND emotion = ?
+           ORDER BY weight DESC
+           LIMIT ?"""
+    end
+
+    rows = isempty(emotion_filter) ?
+        DBInterface.execute(mem.db, query, (min_weight, n)) :
+        DBInterface.execute(mem.db, query, (min_weight, emotion_filter, n))
+
+    result = NamedTuple[]
+    for r in rows
+        push!(result, (
+            flash      = r.flash,
+            user_text  = r.user_text,
+            anima_text = r.anima_text,
+            emotion    = r.emotion,
+            weight     = r.weight,
+            phi        = r.phi,
+            disclosure = r.disclosure,
+        ))
+    end
+    result
+end
+
+"""
+    dialog_summaries_to_block(summaries) → String
+
+Перетворює список summary у текстовий блок для {memory_block} в LLM промпті.
+Формат: [flash N | emotion | weight] user: ... / anima: ...
+"""
+function dialog_summaries_to_block(summaries::Vector)::String
+    isempty(summaries) && return ""
+    lines = String[]
+    for s in summaries
+        push!(lines, "[flash $(s.flash) | $(s.emotion) | w=$(round(s.weight,digits=2))]")
+        push!(lines, "  user: $(s.user_text)")
+        push!(lines, "  anima: $(s.anima_text)")
+    end
+    join(lines, "\n")
 end
 
 # ════════════════════════════════════════════════════════════════════════════

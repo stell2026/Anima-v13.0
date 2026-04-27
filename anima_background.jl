@@ -645,6 +645,23 @@ function repl_with_background!(a::Anima;
     if a.temporal.gap_seconds > 60.0
         println("  [BG] Drift за $(round(a.temporal.gap_seconds/3600,digits=1))год...")
         apply_accumulated_drift!(a, mem)
+        # Оновлюємо MarkovBlanket і crisis після drift
+        # Без цього: перший :crisis показує старий coherence, не поточний
+        try
+            update_blanket!(a.blanket,
+                            a.nt.noradrenaline,
+                            a.nt.dopamine,
+                            a.nt.serotonin,
+                            a.interoception.allostatic_load)
+            _phi_after_drift = clamp(a.nt.dopamine * 0.4 + a.nt.serotonin * 0.4 + 0.2, 0.3, 0.8)
+            update_crisis!(a.crisis, a.sbg, a.blanket,
+                           0.05,              # vfe — після drift майже нуль
+                           _phi_after_drift,  # phi апроксимація
+                           0.2,               # self_pred_error — нейтральний
+                           a.flash_count)
+        catch e
+            @warn "[BG] crisis recompute after drift: $e"
+        end
     end
 
     dialog_path = replace(a.psyche_mem_path, "psyche" => "dialog")
@@ -655,7 +672,7 @@ function repl_with_background!(a::Anima;
                            dialog_history=history, verbose=bg_verbose)
 
     println("\n" * "═"^70)
-    println("  A N I M A  v13.1  —  REPL")
+    println("  ⚛️ A N I M A — REPL")
     subj_label = !isnothing(subj) ? " | 🧬 суб'єктність" : ""
     println("  ♥ серце б'ється$(isnothing(mem) ? "" : " | 🧠 пам'ять активна")$subj_label")
     println("  :bg :bgstop :bgstart :memory :subj :state :vfe :self :crisis :hb :gravity :anchor :solom :dreams :history :clearhist :quit")
@@ -683,7 +700,21 @@ function repl_with_background!(a::Anima;
                 if !startswith(llm_reply, "[LLM помилка")
                     dialog_push!(history, dialog_path, "user",      pending_user_msg)
                     dialog_push!(history, dialog_path, "assistant", llm_reply)
-                    bg.dialog_history[] = history  # оновлюємо для dream generation
+                    bg.dialog_history[] = history
+                    # Dialog summary — зшиваємо текст з episodic станом
+                    if !isnothing(bg.mem)
+                        try
+                            _rows = DBInterface.execute(bg.mem.db,
+                                "SELECT weight, phi, valence, emotion FROM episodic_memory ORDER BY flash DESC LIMIT 1")
+                            _r = isnothing(_rows) ? nothing : first(_rows, nothing)
+                            if !isnothing(_r) && _r.weight >= 0.35
+                                _disc = String(a.inner_dialogue.disclosure_mode)
+                                save_dialog_summary!(bg.mem, a.flash_count,
+                                    pending_user_msg, llm_reply,
+                                    _r.emotion, _r.weight, _r.phi, _r.valence, _disc)
+                            end
+                        catch; end
+                    end
                 end
                 pending_llm = nothing; pending_user_msg = ""
             end

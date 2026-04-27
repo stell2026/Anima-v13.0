@@ -4,7 +4,7 @@
 ![Framework](https://img.shields.io/badge/Methodology-Active--Inference-green?style=flat-square)
 ![License](https://img.shields.io/badge/License-Non--Commercial-red?style=flat-square)
 
-# Anima — Internal State Architecture    🌀
+# Anima — Internal State Architecture                           🌀
 
 Anima is an experimental cognitive architecture that models internal state, conflict, and decision-making — rather than simply generating responses through an LLM.
 

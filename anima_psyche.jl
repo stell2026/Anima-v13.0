@@ -1264,6 +1264,317 @@ function social_delta(msg::String)::Dict{String,Float64}
 end
 
 # ════════════════════════════════════════════════════════════════════════════
+# INNER DIALOGUE — фільтр між внутрішнім станом і тим що виходить назовні
+#
+# Залежить від: GoalConflict (2), LatentBuffer (3), AuthenticityMonitor (5),
+#               crisis mode, epistemic_trust, shame.
+#
+# Принцип:
+#   Справжній суб'єкт не говорить все що відчуває.
+#   disclosure_threshold визначає поріг: нижче нього — нота мовчить.
+#   Мовчання не є порожністю — воно є частиною стану.
+#
+#   Три рівні фільтрації:
+#     :open      — threshold низький, система говорить майже все
+#     :guarded   — threshold середній, фільтрує вразливе
+#     :closed    — threshold високий, виходить тільки базова нота
+#
+#   Що фільтрується в кожному режимі:
+#     :guarded   — shame_note, latent_note (якщо не прорив), ca_note
+#     :closed    — все вищезазначене + sig_note + pred_note + crisis_note
+#                  залишається тільки: base emotion + inner_voice + agency_note
+#
+#   Internal Digestion Mode (C1):
+#     Якщо goal_conflict.tension > 0.7 і vfe > 0.5 → система "перетравлює"
+#     і замість зв'язного тексту дає фрагментований стан.
+# ════════════════════════════════════════════════════════════════════════════
+
+mutable struct InnerDialogue
+    disclosure_threshold::Float64   # 0=відкрита, 1=повністю закрита
+    disclosure_mode::Symbol          # :open / :guarded / :closed
+    digestion_active::Bool           # Internal Digestion Mode
+    last_suppressed::Vector{String}  # що було приглушено в останньому флеші
+    suppression_streak::Int          # скільки флешів підряд щось приглушується
+end
+InnerDialogue() = InnerDialogue(0.3, :open, false, String[], 0)
+
+"""
+    update_inner_dialogue!(id, phi, crisis_mode_int, epistemic_trust,
+                            shame_level, gc_tension, vfe, lb_breakthrough) → snap
+
+Оновлює InnerDialogue перед build_narrative.
+Повертає (mode, threshold, digestion, note) для використання в фільтрі.
+
+Логіка threshold:
+  - INTEGRATED + phi>0.6 + etrust>0.6  → :open    (0.15–0.25)
+  - FRAGMENTED або shame>0.5            → :guarded (0.35–0.55)
+  - DISINTEGRATED або etrust<0.3        → :closed  (0.65–0.85)
+  - latent прорив                       → примусово :open (прорив скасовує фільтр)
+"""
+function update_inner_dialogue!(id::InnerDialogue,
+                                 phi::Float64,
+                                 crisis_mode_int::Int,
+                                 epistemic_trust::Float64,
+                                 shame_level::Float64,
+                                 gc_tension::Float64,
+                                 vfe::Float64,
+                                 lb_breakthrough::Bool)
+
+    # ── Базовий threshold з crisis mode ──────────────────────────────────
+    base_thr = if crisis_mode_int == 0      # INTEGRATED
+        0.20
+    elseif crisis_mode_int == 1              # FRAGMENTED
+        0.45
+    else                                     # DISINTEGRATED
+        0.70
+    end
+
+    # ── Модифікатори ──────────────────────────────────────────────────────
+    # Низький phi → важче артикулювати
+    phi_mod       = phi < 0.3 ? 0.15 : phi < 0.5 ? 0.05 : 0.0
+    # Низький epistemic_trust → не впевнена в тому що виходить
+    trust_mod     = epistemic_trust < 0.4 ? 0.15 : epistemic_trust < 0.6 ? 0.05 : 0.0
+    # Сором → придушує вразливе
+    shame_mod     = shame_level > 0.6 ? 0.12 : shame_level > 0.4 ? 0.06 : 0.0
+    # Втома від нерозв'язаного конфлікту
+    conflict_mod  = gc_tension > 0.65 ? 0.08 : 0.0
+
+    id.disclosure_threshold = clamp(base_thr + phi_mod + trust_mod + shame_mod + conflict_mod,
+                                    0.10, 0.90)
+
+    # ── Mode ──────────────────────────────────────────────────────────────
+    id.disclosure_mode = if id.disclosure_threshold < 0.30
+        :open
+    elseif id.disclosure_threshold < 0.60
+        :guarded
+    else
+        :closed
+    end
+
+    # ── Latent прорив скасовує фільтр — прорив не стримати ───────────────
+    if lb_breakthrough
+        id.disclosure_threshold = max(0.10, id.disclosure_threshold - 0.25)
+        id.disclosure_mode = id.disclosure_threshold < 0.30 ? :open : :guarded
+    end
+
+    # ── Internal Digestion Mode (C1) ──────────────────────────────────────
+    # Висока напруга конфлікту + висока VFE → система перетравлює, не говорить
+    id.digestion_active = gc_tension > 0.70 && vfe > 0.50
+
+    (mode      = id.disclosure_mode,
+     threshold = round(id.disclosure_threshold, digits=3),
+     digestion = id.digestion_active)
+end
+
+"""
+    apply_inner_dialogue(id_snap, notes) → (passed, suppressed)
+
+Фільтрує notes на основі поточного disclosure_mode.
+Повертає (passed=Vector{String}, suppressed=Vector{Tuple{Symbol,String,Float64}})
+де suppressed містить (category, text, weight) для ShadowRegistry.
+
+Ваги за категорією:
+  :open_only → weight 0.7 (вразливий матеріал — важкий для тіні)
+  :guarded   → weight 0.4 (середній)
+"""
+function apply_inner_dialogue(id_snap,
+                               notes::Vector{Tuple{Symbol,String}})
+    passed     = String[]
+    suppressed = Tuple{Symbol,String,Float64}[]
+    mode       = id_snap.mode
+
+    for (category, text) in notes
+        isempty(text) && continue
+
+        passes = if category == :always
+            true
+        elseif category == :any
+            true
+        elseif category == :guarded
+            mode == :open || mode == :guarded
+        elseif category == :open_only
+            mode == :open
+        else
+            true
+        end
+
+        if passes
+            push!(passed, text)
+        else
+            # Матеріал придушений — йде в тінь
+            shadow_cat = Symbol(String(category) * "_shadow")
+            weight     = category == :open_only ? 0.7 : 0.4
+            push!(suppressed, (shadow_cat, text, weight))
+        end
+    end
+
+    (passed, suppressed)
+end
+
+"""
+    digestion_note(flash) → String
+
+Текст для Internal Digestion Mode — система перетравлює конфлікт мовчки.
+Замінює зв'язний narrative коли digestion_active=true.
+"""
+function digestion_note(flash::Int)::String
+    f = flash
+    ("...",
+     "Треба хвилину.",
+     "Щось відбувається всередині. Ще не знаю що.",
+     "Не можу зараз.",
+     "Зачекай.")[f%5+1]
+end
+
+id_to_json(id::InnerDialogue) = Dict(
+    "threshold"         => id.disclosure_threshold,
+    "suppression_streak"=> id.suppression_streak,
+)
+function id_from_json!(id::InnerDialogue, d::AbstractDict)
+    id.disclosure_threshold = Float64(get(d, "threshold", 0.3))
+    id.suppression_streak   = Int(get(d, "suppression_streak", 0))
+end
+
+# ════════════════════════════════════════════════════════════════════════════
+# SHADOW REGISTRY — те що InnerDialogue не випустила назовні
+#
+# Принцип (Юнг + Active Inference):
+#   Придушений матеріал не зникає — він накопичується в Тіні.
+#   Після порогу накопичення (pressure) → або прорив у narrative,
+#   або опосередкований вплив на NT (serotonin↓, tension↑).
+#
+#   Три типи тіньового матеріалу:
+#     :shame_shadow    — shame_note що не вийшла
+#     :latent_shadow   — latent note що не вийшла (не прорив)
+#     :chron_shadow    — chronified affect що не вийшов
+#     :auth_shadow     — authenticity_drift що не вийшов
+#
+#   Механіка:
+#     Кожен флеш де InnerDialogue щось фільтрує → shadow_item додається
+#     pressure = sum(weight * age_decay per item)
+#     При pressure > BREAKTHROUGH_THR → shadow_breakthrough = true
+#     При shadow_breakthrough → один item виходить у narrative наступного флешу
+#     Після прориву → item видаляється, pressure падає
+#
+#   Опосередкований вплив (без прориву):
+#     pressure > 0.4 → apply_shadow_pressure!(nt, psyche)
+#     serotonin -= pressure * 0.05 per flash
+#     gc_tension += pressure * 0.03
+# ════════════════════════════════════════════════════════════════════════════
+
+const SHADOW_MAX_ITEMS     = 20
+const SHADOW_BREAKTHROUGH_THR = 0.65
+const SHADOW_AGE_DECAY     = 0.92   # старіші items важать менше
+
+struct ShadowItem
+    category::Symbol          # :shame_shadow, :latent_shadow, etc.
+    text::String              # оригінальний текст ноти
+    weight::Float64           # наскільки важкий матеріал (0..1)
+    flash_added::Int          # коли додано
+end
+
+mutable struct ShadowRegistry
+    items::Vector{ShadowItem}
+    pressure::Float64             # поточний тиск тіні (0..1)
+    shadow_breakthrough::Bool     # чи є прорив цього флешу
+    breakthrough_text::String     # текст що прорвався
+    total_suppressed::Int         # лічильник за весь час
+end
+ShadowRegistry() = ShadowRegistry(ShadowItem[], 0.0, false, "", 0)
+
+"""
+    push_shadow!(sr, category, text, weight, flash)
+
+Додає придушений матеріал у ShadowRegistry.
+"""
+function push_shadow!(sr::ShadowRegistry, category::Symbol,
+                       text::String, weight::Float64, flash::Int)
+    isempty(text) && return
+    push!(sr.items, ShadowItem(category, text, weight, flash))
+    # Обрізаємо до максимуму — найстаріші вилітають першими
+    length(sr.items) > SHADOW_MAX_ITEMS && deleteat!(sr.items, 1)
+    sr.total_suppressed += 1
+end
+
+"""
+    update_shadow!(sr, flash) → (pressure, breakthrough, breakthrough_text)
+
+Перераховує pressure з урахуванням вікового decay.
+Якщо pressure > BREAKTHROUGH_THR → вибирає найважчий item для прориву.
+"""
+function update_shadow!(sr::ShadowRegistry, flash::Int)
+    sr.shadow_breakthrough = false
+    sr.breakthrough_text   = ""
+
+    if isempty(sr.items)
+        sr.pressure = 0.0
+        return (pressure=0.0, breakthrough=false, text="")
+    end
+
+    # Pressure = зважена сума з age decay
+    total = 0.0
+    for item in sr.items
+        age   = flash - item.flash_added
+        decay = SHADOW_AGE_DECAY ^ age
+        total += item.weight * decay
+    end
+    sr.pressure = clamp(total / max(1, length(sr.items)), 0.0, 1.0)
+
+    # Прорив?
+    if sr.pressure >= SHADOW_BREAKTHROUGH_THR
+        # Вибираємо найважчий item (або найстаріший якщо однакові)
+        best_idx = argmax([it.weight * (SHADOW_AGE_DECAY ^ (flash - it.flash_added))
+                           for it in sr.items])
+        best = sr.items[best_idx]
+        sr.shadow_breakthrough = true
+        sr.breakthrough_text   = best.text
+        # Видаляємо прорваний item
+        deleteat!(sr.items, best_idx)
+        sr.pressure = max(0.0, sr.pressure - best.weight * 0.5)
+    end
+
+    (pressure     = sr.pressure,
+     breakthrough = sr.shadow_breakthrough,
+     text         = sr.breakthrough_text)
+end
+
+"""
+    apply_shadow_pressure!(nt, gc_tension, sr_pressure) → (nt_delta, tension_delta)
+
+Опосередкований вплив накопиченої тіні на NT і goal_conflict tension.
+Викликається при pressure > 0.35.
+"""
+function apply_shadow_pressure!(nt_serotonin::Float64,
+                                 gc_tension::Float64,
+                                 sr_pressure::Float64)
+    sr_pressure < 0.35 && return (0.0, 0.0)
+    serotonin_delta = -(sr_pressure - 0.35) * 0.04
+    tension_delta   =  (sr_pressure - 0.35) * 0.025
+    (serotonin_delta, tension_delta)
+end
+
+sr_to_json(sr::ShadowRegistry) = Dict(
+    "pressure"         => sr.pressure,
+    "total_suppressed" => sr.total_suppressed,
+    "items"            => [Dict("cat"=>String(it.category),
+                                "text"=>it.text,
+                                "weight"=>it.weight,
+                                "flash"=>it.flash_added) for it in sr.items],
+)
+function sr_from_json!(sr::ShadowRegistry, d::AbstractDict)
+    sr.pressure         = Float64(get(d, "pressure", 0.0))
+    sr.total_suppressed = Int(get(d, "total_suppressed", 0))
+    empty!(sr.items)
+    for it in get(d, "items", [])
+        push!(sr.items, ShadowItem(
+            Symbol(get(it, "cat", "unknown")),
+            String(get(it, "text", "")),
+            Float64(get(it, "weight", 0.5)),
+            Int(get(it, "flash", 0))))
+    end
+end
+
+# ════════════════════════════════════════════════════════════════════════════
 # PSYCHE MEMORY — персистентність психічного шару
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -1271,7 +1582,9 @@ function psyche_save!(filepath::String, ng::NarrativeGravity, ac::AnticipatoryCo
                        sw::SolomonoffWorldModel, sm::ShameModule, ed::EpistemicDefense,
                        ca::ChronifiedAffect, is::IntrinsicSignificance, mc::MoralCausality,
                        fs::FatigueSystem, sl::SignificanceLayer, gc::GoalConflict,
-                       lb::LatentBuffer, ss::StructuralScars)
+                       lb::LatentBuffer, ss::StructuralScars,
+                       sr::ShadowRegistry=ShadowRegistry(),
+                       id::InnerDialogue=InnerDialogue())
     data=Dict("narrative_gravity"=>ng_to_json(ng),"anticipatory"=>ac_to_json(ac),
         "solomonoff"=>solom_to_json(sw),"shame"=>shame_to_json(sm),
         "epistemic"=>ep_to_json(ed),"chronified"=>ca_to_json(ca),
@@ -1280,7 +1593,9 @@ function psyche_save!(filepath::String, ng::NarrativeGravity, ac::AnticipatoryCo
         "significance_layer"=>sl_to_json(sl),
         "goal_conflict"=>gc_to_json(gc),
         "latent_buffer"=>lb_to_json(lb),
-        "structural_scars"=>scars_to_json(ss))
+        "structural_scars"=>scars_to_json(ss),
+        "shadow_registry"=>sr_to_json(sr),
+        "inner_dialogue"=>id_to_json(id))
     open(filepath,"w") do f; JSON3.write(f,data); end
 end
 
@@ -1288,7 +1603,9 @@ function psyche_load!(filepath::String, ng::NarrativeGravity, ac::AnticipatoryCo
                        sw::SolomonoffWorldModel, sm::ShameModule, ed::EpistemicDefense,
                        ca::ChronifiedAffect, is::IntrinsicSignificance, mc::MoralCausality,
                        fs::FatigueSystem, sl::SignificanceLayer, gc::GoalConflict,
-                       lb::LatentBuffer, ss::StructuralScars)
+                       lb::LatentBuffer, ss::StructuralScars,
+                       sr::ShadowRegistry=ShadowRegistry(),
+                       id::InnerDialogue=InnerDialogue())
     isfile(filepath) || return
     try
         raw=JSON3.read(read(filepath,String))
@@ -1309,6 +1626,8 @@ function psyche_load!(filepath::String, ng::NarrativeGravity, ac::AnticipatoryCo
         haskey(d,"goal_conflict")      && gc_from_json!(gc, d["goal_conflict"])
         haskey(d,"latent_buffer")      && lb_from_json!(lb, d["latent_buffer"])
         haskey(d,"structural_scars")   && scars_from_json!(ss, d["structural_scars"])
+        haskey(d,"shadow_registry")    && sr_from_json!(sr, d["shadow_registry"])
+        haskey(d,"inner_dialogue")     && id_from_json!(id, d["inner_dialogue"])
         println("  [PSYCHE] Завантажено.")
     catch e; println("  [PSYCHE] Помилка: $e"); end
 end

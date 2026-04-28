@@ -1,97 +1,81 @@
-#=
-╔══════════════════════════════════════════════════════════════════════════════╗
-║                    A N I M A  —  Memory DB  (Julia)                          ║
-║                                                                              ║
-║  Пам'ять як поле — впливає на кожен шар, не є окремим шаром.                 ║
-║                                                                              ║
-║  Три рівні зберігання (SQLite):                                              ║
-║    episodic_memory  — епізодична (буфер + core)                              ║
-║    semantic_memory  — семантична (переконання, що стали особистістю)         ║
-║    affect_state     — хронічний афективний фон                               ║
-║                                                                              ║
-║  Інтеграція з experience! pipeline:                                          ║
-║    memory_write_event!  — після L0 (stimulus → буфер)                        ║
-║    memory_stimulus_bias — між L0 і L1 (упередження стимулу)                  ║
-║    memory_nt_baseline!  — L1 (NT baseline з affect_state)                    ║
-║    memory_pred_bias     — L2 (викривлення prediction error)                  ║
-║    memory_self_update!  — після L5 (SelfBeliefGraph ← semantic)              ║
-║    memory_crisis_load   — L6 (coherence ← structural накопичення)            ║
-║                                                                              ║
-║  Фоновий процес:                                                             ║
-║    start_memory_loop!   — decay + consolidation кожні N секунд               ║
-║    stop_memory_loop!                                                         ║
-║                                                                              ║
-║  Ініціалізація:                                                              ║
-║    mem = MemoryDB(joinpath(@__DIR__, "memory", "anima.db"))                  ║
-╚══════════════════════════════════════════════════════════════════════════════╝
-=#
-
-# Потребує: SQLite.jl  — ]add SQLite
-# Потребує: anima_core.jl (clamp01, safe_nan — вже визначені там)
+# A N I M A  —  Memory DB  (Julia)
+#
+# Пам'ять як поле, що впливає на кожен шар системи.
+# SQLite: episodic, semantic, affect_state, latent_buffer, dialog_summaries,
+# personality_traits, memory_links.
+#
+# Інтеграція з experience!:
+#   memory_write_event!    — після стимулу (буфер)
+#   memory_stimulus_bias   — між L0 і L1 (упередження стимулу)
+#   memory_nt_baseline!    — L1 (NT baseline з affect_state)
+#   memory_pred_bias       — L2 (викривлення prediction error)
+#   memory_self_update!    — після SelfBeliefGraph (← semantic)
+#   memory_crisis_load     — L6 (coherence ← структурне навантаження)
+#
+# Фоновий процес:
+#   start_memory_loop!     — decay + consolidation кожні N секунд
+#   stop_memory_loop!
 
 using SQLite
-using Tables   # для ітерації результатів DBInterface.execute
+using Tables
 
-# ════════════════════════════════════════════════════════════════════════════
-# CONSTANTS
-# ════════════════════════════════════════════════════════════════════════════
+# --- Константи ------------------------------------------------------------
 
-const MEM_IMPORTANCE_THRESHOLD  = 0.20  # нижче — не зберігати в episodic
-const MEM_CORE_MAX              = 500   # максимум записів в episodic
-const MEM_DECAY_RATE            = 0.001 # за один decay-тік (~60с)
-const MEM_MIN_WEIGHT            = 0.05  # нижче — видалити з episodic
-const MEM_CONSOLIDATE_THRESHOLD = 0.35  # weight для консолідації в semantic
-const MEM_TOPK_INFLUENCE        = 10    # скільки найсильніших подій впливають на стан
-const MEM_AFFECT_DECAY          = 0.995 # decay affect за тік (~60с) — стрес зникає
-const MEM_LINK_SIMILARITY_THR   = 0.75  # поріг схожості для створення зв'язку
+const MEM_IMPORTANCE_THRESHOLD  = 0.20
+const MEM_CORE_MAX              = 500
+const MEM_DECAY_RATE            = 0.001
+const MEM_MIN_WEIGHT            = 0.05
+const MEM_CONSOLIDATE_THRESHOLD = 0.35
+const MEM_TOPK_INFLUENCE        = 10
+const MEM_AFFECT_DECAY          = 0.995
+const MEM_LINK_SIMILARITY_THR   = 0.75
+const MEM_MAX_NT_BIAS           = 0.08
+const MEM_MAX_PRED_BIAS         = 0.15
+const MEM_MAX_STIM_BIAS         = 0.12
 
-# Ліміти впливу на стан — захист від перебільшень
-const MEM_MAX_NT_BIAS           = 0.08  # максимальний вплив на NT
-const MEM_MAX_PRED_BIAS         = 0.15  # максимальний вплив на prediction error
-const MEM_MAX_STIM_BIAS         = 0.12  # максимальний вплив на stimulus
+const DIALOG_SUMMARY_THR     = 0.35
+const DIALOG_SUMMARY_MAX     = 200
+const DIALOG_SUMMARY_RECALL  = 5
 
-# Захисна конвертація SQL значень → Float64
-# SQLite повертає missing для NULL (порожні агрегати), не nothing
+const PHENOTYPE_INFLUENCE_THR = 0.35
+const PHENOTYPE_STEP          = 0.001
+const PHENOTYPE_DECAY         = 0.9998
+
+const EPISODIC_VEC_FIELDS = [:arousal, :valence, :tension, :phi,
+                              :prediction_error, :self_impact]
+const SIMILAR_STATE_THR   = 0.88
+const SIMILAR_STATE_TOP_N = 3
+
 _fdb(x, d::Float64=0.0) = (ismissing(x) || isnothing(x)) ? d : Float64(x)
 
-# ════════════════════════════════════════════════════════════════════════════
-# MemoryDB — головна структура
-# ════════════════════════════════════════════════════════════════════════════
+# --- MemoryDB -------------------------------------------------------------
 
 mutable struct MemoryDB
     db::SQLite.DB
     path::String
-    # Кешовані значення — щоб не ходити в БД на кожен флеш
     _affect_cache::Dict{String, Float64}
     _semantic_cache::Dict{String, Float64}
     _cache_dirty::Bool
-    _cache_flash::Int   # коли останній раз оновлювали кеш
-    # Rolling stats для динамічного importance
-    _rolling_arousal::Float64   # середній arousal за останні N подій
-    _rolling_pe::Float64        # середній prediction_error
-    _rolling_n::Int             # кількість подій у rolling window
-    # Фоновий процес
+    _cache_flash::Int
+    _rolling_arousal::Float64
+    _rolling_pe::Float64
+    _rolling_n::Int
     _loop_task::Union{Task, Nothing}
     _loop_stop::Threads.Atomic{Bool}
 end
 
-"""
-    MemoryDB(db_path)
-
-Ініціалізувати базу пам'яті. Створює файл і таблиці якщо не існують.
-"""
 function MemoryDB(db_path::String=joinpath("memory", "anima.db"))
     dir = dirname(db_path)
     isempty(dir) || isdir(dir) || mkpath(dir)
 
     db = SQLite.DB(db_path)
-    SQLite.busy_timeout(db, 5000)  # чекати до 5с при блокуванні (конкурентний доступ)
+    SQLite.busy_timeout(db, 5000)
     _init_schema!(db)
 
     mem = MemoryDB(db, db_path,
         Dict{String,Float64}(), Dict{String,Float64}(),
         true, 0,
-        0.3, 0.3, 0,   # rolling stats (початкові значення нейтральні)
+        0.3, 0.3, 0,
         nothing, Threads.Atomic{Bool}(false))
 
     _refresh_cache!(mem)
@@ -99,12 +83,9 @@ function MemoryDB(db_path::String=joinpath("memory", "anima.db"))
     mem
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# SCHEMA
-# ════════════════════════════════════════════════════════════════════════════
+# --- Schema ---------------------------------------------------------------
 
 function _init_schema!(db::SQLite.DB)
-    # Епізодична пам'ять — конкретні події з вагою важливості
     SQLite.execute(db, """
     CREATE TABLE IF NOT EXISTS episodic_memory (
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -123,24 +104,10 @@ function _init_schema!(db::SQLite.DB)
     );
     """)
 
-    # Індекс для швидкого decay і recall
-    SQLite.execute(db, """
-    CREATE INDEX IF NOT EXISTS idx_episodic_weight
-    ON episodic_memory(weight DESC);
-    """)
+    SQLite.execute(db, "CREATE INDEX IF NOT EXISTS idx_episodic_weight ON episodic_memory(weight DESC);")
+    SQLite.execute(db, "CREATE INDEX IF NOT EXISTS idx_episodic_flash ON episodic_memory(flash DESC);")
+    SQLite.execute(db, "CREATE INDEX IF NOT EXISTS idx_episodic_emotion ON episodic_memory(emotion, weight DESC);")
 
-    SQLite.execute(db, """
-    CREATE INDEX IF NOT EXISTS idx_episodic_flash
-    ON episodic_memory(flash DESC);
-    """)
-
-    SQLite.execute(db, """
-    CREATE INDEX IF NOT EXISTS idx_episodic_emotion
-    ON episodic_memory(emotion, weight DESC);
-    """)
-
-    # Асоціативні зв'язки між подіями — "ланцюжки досвіду"
-    # strength: наскільки схожі події (0..1), co_occur: скільки разів разом
     SQLite.execute(db, """
     CREATE TABLE IF NOT EXISTS memory_links (
         id_a     INTEGER NOT NULL,
@@ -153,8 +120,6 @@ function _init_schema!(db::SQLite.DB)
     );
     """)
 
-    # Семантична пам'ять — переконання що стали особистістю
-    # key: назва переконання (відповідає SelfBeliefGraph або власні)
     SQLite.execute(db, """
     CREATE TABLE IF NOT EXISTS semantic_memory (
         key     TEXT    PRIMARY KEY,
@@ -164,8 +129,6 @@ function _init_schema!(db::SQLite.DB)
     );
     """)
 
-    # Хронічний афективний фон — змінює NT baseline
-    # name: "stress", "resentment", "motivation_bias", "anxiety"
     SQLite.execute(db, """
     CREATE TABLE IF NOT EXISTS affect_state (
         name    TEXT    PRIMARY KEY,
@@ -174,8 +137,6 @@ function _init_schema!(db::SQLite.DB)
     );
     """)
 
-    # Latent buffer — малі незначні події що накопичуються мовчки
-    # Коли тиск перевищує поріг — вибух у синтетичну подію
     SQLite.execute(db, """
     CREATE TABLE IF NOT EXISTS latent_buffer (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -187,9 +148,6 @@ function _init_schema!(db::SQLite.DB)
     );
     """)
 
-    # Діалогові summary — значущі фрагменти розмови прив'язані до episodic стану
-    # Зшивають dialog.json (текст) і episodic_memory (вага/стан)
-    # Зберігаються тільки коли episodic weight > DIALOG_SUMMARY_THR
     SQLite.execute(db, """
     CREATE TABLE IF NOT EXISTS dialog_summaries (
         id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -205,30 +163,31 @@ function _init_schema!(db::SQLite.DB)
     );
     """)
 
-    SQLite.execute(db, """
-    CREATE INDEX IF NOT EXISTS idx_dialog_weight
-    ON dialog_summaries(weight DESC);
-    """)
+    SQLite.execute(db, "CREATE INDEX IF NOT EXISTS idx_dialog_weight ON dialog_summaries(weight DESC);")
+    SQLite.execute(db, "CREATE INDEX IF NOT EXISTS idx_dialog_flash ON dialog_summaries(flash DESC);")
 
     SQLite.execute(db, """
-    CREATE INDEX IF NOT EXISTS idx_dialog_flash
-    ON dialog_summaries(flash DESC);
+    CREATE TABLE IF NOT EXISTS personality_traits (
+        trait          TEXT    PRIMARY KEY,
+        score          REAL    NOT NULL DEFAULT 0.0,
+        evidence_count INTEGER NOT NULL DEFAULT 0,
+        valence_bias   REAL    NOT NULL DEFAULT 0.0,
+        last_updated   INTEGER NOT NULL DEFAULT 0
+    );
     """)
+
+    SQLite.execute(db, "CREATE INDEX IF NOT EXISTS idx_traits_score ON personality_traits(score DESC);")
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# КЕШ — NT і semantic читаються кожен флеш, БД не чіпаємо занадто часто
-# ════════════════════════════════════════════════════════════════════════════
+# --- Кеш ------------------------------------------------------------------
 
 function _refresh_cache!(mem::MemoryDB)
-    # affect_state
     empty!(mem._affect_cache)
     for row in Tables.rowtable(DBInterface.execute(mem.db,
             "SELECT name, value FROM affect_state"))
         mem._affect_cache[row.name] = row.value
     end
 
-    # semantic_memory
     empty!(mem._semantic_cache)
     for row in Tables.rowtable(DBInterface.execute(mem.db,
             "SELECT key, value FROM semantic_memory"))
@@ -238,7 +197,6 @@ function _refresh_cache!(mem::MemoryDB)
     mem._cache_dirty = false
 end
 
-# Оновити кеш якщо пройшло більше N флешів або він брудний
 function _maybe_refresh!(mem::MemoryDB, current_flash::Int; every::Int=10)
     if mem._cache_dirty || (current_flash - mem._cache_flash) >= every
         _refresh_cache!(mem)
@@ -246,22 +204,8 @@ function _maybe_refresh!(mem::MemoryDB, current_flash::Int; every::Int=10)
     end
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# ЗАПИС ПОДІЇ — після L0
-# ════════════════════════════════════════════════════════════════════════════
+# --- Запис події ----------------------------------------------------------
 
-"""
-    memory_write_event!(mem, flash, emotion, arousal, valence,
-                        prediction_error, self_impact, tension, phi)
-
-Записати подію в episodic_memory якщо вона достатньо важлива.
-Викликати в experience! після обчислення основних показників.
-
-Динамічний importance: під стресом система "пам'ятає більше" —
-поріг знижується, weight зростає пропорційно до поточного стресу.
-
-Після запису: шукає схожі події і створює асоціативний зв'язок.
-"""
 function memory_write_event!(mem::MemoryDB,
                               flash::Int,
                               emotion::String,
@@ -272,18 +216,14 @@ function memory_write_event!(mem::MemoryDB,
                               tension::Float64,
                               phi::Float64)
 
-    # ── Оновити rolling stats (exponential moving average) ────────────────
-    α = 0.15   # learning rate rolling window
+    α = 0.15
     mem._rolling_arousal = mem._rolling_arousal * (1-α) + arousal * α
     mem._rolling_pe      = mem._rolling_pe      * (1-α) + prediction_error * α
     mem._rolling_n      += 1
 
-    # ── Динамічний importance — залежить від поточного стресу ─────────────
-    # Під стресом система запам'ятовує більше (знижений поріг, вищий weight)
     current_stress = get(mem._affect_cache, "stress", 0.0)
-    stress_amp = 1.0 + current_stress * 0.6   # 1.0..1.6
+    stress_amp = 1.0 + current_stress * 0.6
 
-    # Контекстуальний importance: відхилення від rolling середнього важливіше
     arousal_surprise = abs(arousal - mem._rolling_arousal)
     pe_surprise      = abs(prediction_error - mem._rolling_pe)
 
@@ -291,25 +231,18 @@ function memory_write_event!(mem::MemoryDB,
            0.20 * arousal +
            0.20 * abs(valence) +
            0.15 * self_impact +
-           0.10 * arousal_surprise +   # несподіваний arousal
-           0.10 * pe_surprise)         # несподівана помилка
+           0.10 * arousal_surprise +
+           0.10 * pe_surprise)
     imp = clamp(imp * stress_amp, 0.0, 1.0)
 
-    # Динамічний поріг: під стресом зберігаємо більше
     dynamic_threshold = MEM_IMPORTANCE_THRESHOLD * (1.0 - current_stress * 0.3)
     imp < dynamic_threshold && return
 
     ts = time()
 
-    # Affective resistance — самовплив і валентність визначають наскільки
-    # спогад "чіпляється". Негативне + high self_impact → забувається повільніше.
-    # Це не вага — це опір decay. Травма не хоче зникати.
     resistance = clamp(self_impact * 0.6 + abs(valence) * 0.3 * (valence < 0 ? 1.4 : 0.7), 0.0, 1.0)
-
-    # Signature — позиція події у просторі афекту для дедуплікації
     signature = arousal * 0.5 + prediction_error * 0.3 + abs(self_impact) * 0.2
 
-    # Latent buffer — якщо подія нижче порогу але не нульова — осідає мовчки
     if imp < dynamic_threshold && imp > 0.05
         DBInterface.execute(mem.db, """
         INSERT INTO latent_buffer (importance, valence, tension, flash, timestamp)
@@ -317,8 +250,6 @@ function memory_write_event!(mem::MemoryDB,
         """, (imp, valence, tension, flash, ts))
     end
 
-    # Дедуплікація через signature — якщо дуже схожа подія вже є недавно,
-    # не створюємо новий запис а підсилюємо weight існуючого
     dedup_rows = Tables.rowtable(DBInterface.execute(mem.db, """
     SELECT id, weight FROM episodic_memory
     WHERE ABS(signature - ?) < 0.08 AND flash >= ?
@@ -345,38 +276,25 @@ function memory_write_event!(mem::MemoryDB,
     """, (flash, ts, emotion, arousal, valence,
           prediction_error, self_impact, tension, phi, imp, resistance, signature))
 
-    # ── Incremental affect update — кожна подія одразу формує фон ───────
-    # Не чекаємо consolidation — affect накопичується з кожного досвіду.
-    # Малий крок (0.003–0.006) — багато подій потрібно щоб помітно змінити фон.
-    # Це чесніше: система відчуває напругу від кожного моменту, не тільки від "важких".
-
-    # Стрес: tension вище норми + arousal вище норми
-    # Поріг знижено з 0.4 до 0.3 — при типовому tension 0.30-0.45
-    # stress майже не накопичувався. Тепер накопичується з помірних станів.
     stress_inc = clamp((tension - 0.3) * 0.4 + (arousal - 0.3) * 0.4, 0.0, 1.0)
     if stress_inc > 0.0
         _upsert_affect!(mem.db, "stress",
             stress_inc * imp * 0.005, 0.0, 1.0)
     end
 
-    # Тривога: негативна валентність + prediction_error
     if valence < -0.1 && prediction_error > 0.3
         anxiety_inc = abs(valence) * prediction_error
         _upsert_affect!(mem.db, "anxiety",
             anxiety_inc * imp * 0.004, 0.0, 1.0)
     end
 
-    # Мотивація: позитивна валентність + phi — добрий досвід мотивує
     if valence > 0.15 && phi > 0.2
         _upsert_affect!(mem.db, "motivation_bias",
             valence * phi * imp * 0.003, 0.0, 1.0)
     end
 
-    mem._cache_dirty = true   # кеш потребує оновлення
+    mem._cache_dirty = true
 
-    # ── Асоціативні зв'язки — знайти схожу подію і зв'язати ─────────────
-    # Similarity = 1 - нормована евклідова відстань у просторі (arousal, valence, tension)
-    # Беремо тільки топ-1 схожу (не будуємо повний граф — надто дорого)
     new_id_row = first(Tables.rowtable(DBInterface.execute(mem.db,
         "SELECT last_insert_rowid() as id")))
     new_id = Int(new_id_row.id)
@@ -410,19 +328,8 @@ function memory_write_event!(mem::MemoryDB,
     nothing
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# ІНТЕГРАЦІЯ З PIPELINE
-# ════════════════════════════════════════════════════════════════════════════
+# --- Інтеграція з pipeline ------------------------------------------------
 
-"""
-    memory_stimulus_bias(mem, stim) → Dict{String,Float64}
-
-L0 → L1: упередження стимулу на основі episodic пам'яті.
-Повертає delta що додається до stim перед apply_stimulus!.
-
-Логіка: схожі минулі події підсилюють поточний стимул.
-"Схожість" тут — за emotion і tension (без embedding, детермінована).
-"""
 function memory_stimulus_bias(mem::MemoryDB,
                                stim::Dict{String,Float64},
                                emotion::String,
@@ -430,7 +337,6 @@ function memory_stimulus_bias(mem::MemoryDB,
 
     delta = Dict{String,Float64}()
 
-    # Беремо останні важливі події з тією самою емоцією
     rows = Tables.rowtable(DBInterface.execute(mem.db, """
     SELECT arousal, valence, tension, weight
     FROM episodic_memory
@@ -452,13 +358,11 @@ function memory_stimulus_bias(mem::MemoryDB,
         bias_valence += row.valence * w
     end
 
-    total_w < 0.01 && return delta   # немає релевантних спогадів
+    total_w < 0.01 && return delta
 
-    # Нормалізуємо і застосовуємо з малим коефіцієнтом
     scale = MEM_MAX_STIM_BIAS / total_w
     t_current = get(stim, "tension", 0.5)
 
-    # Упередження тільки якщо напрямок збігається (посилення, не корекція)
     if bias_tension > 0 && t_current > 0.3
         delta["tension"] = clamp(bias_tension * scale, 0.0, MEM_MAX_STIM_BIAS)
     end
@@ -467,10 +371,6 @@ function memory_stimulus_bias(mem::MemoryDB,
                                   -MEM_MAX_STIM_BIAS, MEM_MAX_STIM_BIAS)
     end
 
-    # Avoidance signal — якщо минулі схожі події були негативні і high self_impact,
-    # система упереджено "тримає дистанцію".
-    # Передаємо як зниження satisfaction — apply_stimulus! знає цей ключ.
-    # (Не "avoidance" — такого ключа немає в apply_stimulus!)
     avoid_rows = Tables.rowtable(DBInterface.execute(mem.db, """
     SELECT COALESCE(AVG(valence),    0.0) as avg_val,
            COALESCE(AVG(self_impact),0.0) as avg_imp,
@@ -494,15 +394,6 @@ function memory_stimulus_bias(mem::MemoryDB,
     delta
 end
 
-"""
-    memory_nt_baseline!(mem, nt)
-
-L1: коригує NT baseline з хронічного affect_state.
-Викликати після decay_to_baseline! і до compute_phi.
-
-Хронічний стрес → noradrenaline вгору, serotonin вниз.
-Хронічна мотивація → dopamine вгору.
-"""
 function memory_nt_baseline!(mem::MemoryDB, nt, flash::Int)
     _maybe_refresh!(mem, flash)
 
@@ -511,7 +402,6 @@ function memory_nt_baseline!(mem::MemoryDB, nt, flash::Int)
     mot_bias  = get(mem._affect_cache, "motivation_bias",  0.0)
     resentment= get(mem._affect_cache, "resentment",       0.0)
 
-    # Стрес: noradrenaline вгору, serotonin вниз
     if stress > 0.2
         push_n  = clamp((stress - 0.2) * MEM_MAX_NT_BIAS * 2.0,
                         0.0, MEM_MAX_NT_BIAS)
@@ -521,19 +411,16 @@ function memory_nt_baseline!(mem::MemoryDB, nt, flash::Int)
         nt.serotonin     = clamp(nt.serotonin     - pull_s, 0.0, 1.0)
     end
 
-    # Тривога: noradrenaline вгору
     if anxiety > 0.2
         push_n = clamp((anxiety - 0.2) * MEM_MAX_NT_BIAS, 0.0, MEM_MAX_NT_BIAS)
         nt.noradrenaline = clamp(nt.noradrenaline + push_n, 0.0, 1.0)
     end
 
-    # Мотиваційне упередження: dopamine
     if mot_bias > 0.15
         push_d = clamp(mot_bias * MEM_MAX_NT_BIAS, 0.0, MEM_MAX_NT_BIAS)
         nt.dopamine = clamp(nt.dopamine + push_d, 0.0, 1.0)
     end
 
-    # Образа (resentment): знижує serotonin хронічно
     if resentment > 0.25
         pull_s = clamp((resentment - 0.25) * MEM_MAX_NT_BIAS, 0.0, MEM_MAX_NT_BIAS)
         nt.serotonin = clamp(nt.serotonin - pull_s, 0.0, 1.0)
@@ -542,48 +429,23 @@ function memory_nt_baseline!(mem::MemoryDB, nt, flash::Int)
     nothing
 end
 
-"""
-    memory_pred_bias(mem, pred_error, flash) → Float64
-
-L2: викривлення prediction error на основі пам'яті.
-Повертає скоригований pred_error.
-
-Якщо система вже часто помилялась — очікування занижені,
-нові помилки сприймаються гостріше.
-"""
 function memory_pred_bias(mem::MemoryDB, pred_error::Float64, flash::Int)::Float64
     _maybe_refresh!(mem, flash)
-
-    # world_uncertainty — накопичена з консолідації
     world_unc = get(mem._semantic_cache, "world_uncertainty", 0.0)
-
-    world_unc < 0.1 && return pred_error   # немає значущого впливу
-
-    # Висока невизначеність → помилки сприймаються гостріше
+    world_unc < 0.1 && return pred_error
     amplifier = 1.0 + world_unc * MEM_MAX_PRED_BIAS / 0.5
     return clamp(pred_error * amplifier, 0.0, 1.0)
 end
 
-"""
-    memory_self_update!(mem, sbg, flash)
-
-L5: оновлює SelfBeliefGraph з semantic_memory.
-Викликати після update_self! в experience!.
-
-Семантичні переконання що накопичились → впливають на confidence beliefs.
-"""
 function memory_self_update!(mem::MemoryDB, sbg, flash::Int)
-    _maybe_refresh!(mem, flash; every=20)  # рідше — self-model консервативна
+    _maybe_refresh!(mem, flash; every=20)
 
-    # "я нестабільна" → тиск на attractor_stability
     instability = get(mem._semantic_cache, "I_am_unstable", 0.0)
     if instability > 0.4
-        # Не challenge_belief! — м'якший вплив через epistemic_trust
         delta = (instability - 0.4) * 0.02
         sbg.epistemic_trust = clamp(sbg.epistemic_trust - delta, 0.0, 1.0)
     end
 
-    # "user_matters" → підтверджує belief про важливість контакту
     user_matters = get(mem._semantic_cache, "User_matters", 0.0)
     if user_matters > 0.5 && haskey(sbg.beliefs, "я безпечна")
         sbg.beliefs["я безпечна"].confidence =
@@ -593,36 +455,15 @@ function memory_self_update!(mem::MemoryDB, sbg, flash::Int)
     nothing
 end
 
-"""
-    memory_crisis_load(mem, flash) → Float64
-
-L6: додаткове навантаження на coherence з накопиченої пам'яті.
-Повертає delta_coherence (від'ємне = знижує coherence).
-
-Структурні шрами в пам'яті → fragility coherence.
-"""
 function memory_crisis_load(mem::MemoryDB, flash::Int)::Float64
     _maybe_refresh!(mem, flash; every=15)
-
     fragility = get(mem._semantic_cache, "structural_fragility", 0.0)
     fragility < 0.15 && return 0.0
-
-    # М'який вплив — пам'ять не може сама по собі кинути в кризу
     return -clamp((fragility - 0.15) * 0.05, 0.0, 0.04)
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# ФОНОВИЙ ПРОЦЕС — decay + consolidation
-# ════════════════════════════════════════════════════════════════════════════
+# --- Фоновий процес --------------------------------------------------------
 
-"""
-    start_memory_loop!(mem; interval=60.0) → Task
-
-Запустити фоновий цикл пам'яті.
-interval — секунд між циклами (default: 60с).
-
-Цикл: decay episodic → prune → consolidate → оновити кеш.
-"""
 function start_memory_loop!(mem::MemoryDB; interval::Float64=60.0)
     mem._loop_stop[] = false
 
@@ -650,11 +491,6 @@ function start_memory_loop!(mem::MemoryDB; interval::Float64=60.0)
     task
 end
 
-"""
-    stop_memory_loop!(mem)
-
-Зупинити фоновий цикл пам'яті.
-"""
 function stop_memory_loop!(mem::MemoryDB)
     mem._loop_stop[] = true
     if !isnothing(mem._loop_task)
@@ -662,24 +498,16 @@ function stop_memory_loop!(mem::MemoryDB)
     end
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# DECAY — поступове забування
-# ════════════════════════════════════════════════════════════════════════════
+# --- Decay, Prune, Consolidate ---------------------------------------------
 
 function _memory_decay!(mem::MemoryDB)
     DBInterface.execute(mem.db, "BEGIN TRANSACTION")
     try
-        # Episodic weight decay — resistance сповільнює забування
-        # Спогади з high resistance (травма, self-impact) decay повільніше
-        # Формула: effective_rate = DECAY_RATE * (1 - resistance * 0.7)
-        # При resistance=1.0 → decay = 0.3x від норми
         DBInterface.execute(mem.db, """
         UPDATE episodic_memory
         SET weight = weight * exp(? * (1.0 - resistance * 0.7))
         """, (-MEM_DECAY_RATE,))
 
-        # Affect decay — стрес, тривога, образа зникають з часом
-        # MEM_AFFECT_DECAY = 0.995 → за годину (60 тіків) знижується на ~26%
         DBInterface.execute(mem.db, """
         UPDATE affect_state SET value = value * ?  WHERE value > 0.005
         """, (MEM_AFFECT_DECAY,))
@@ -720,14 +548,9 @@ function _memory_prune!(mem::MemoryDB)
     nothing
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# CONSOLIDATION — episodic → semantic
-# ════════════════════════════════════════════════════════════════════════════
-
 function _memory_consolidate!(mem::MemoryDB)
     DBInterface.execute(mem.db, "BEGIN TRANSACTION")
     try
-        # Беремо топ-K найважливіших подій
         rows = Tables.rowtable(DBInterface.execute(mem.db, """
         SELECT CAST(arousal          AS REAL) as arousal,
                CAST(valence          AS REAL) as valence,
@@ -742,7 +565,6 @@ function _memory_consolidate!(mem::MemoryDB)
         LIMIT ?
         """, (MEM_CONSOLIDATE_THRESHOLD, MEM_TOPK_INFLUENCE)))
 
-        # _fdb — глобальний helper: missing/nothing → default Float64
         n = 0
         sum_arousal = 0.0; sum_pe = 0.0; sum_tension = 0.0
         sum_valence = 0.0; sum_impact = 0.0; sum_phi = 0.0
@@ -764,7 +586,6 @@ function _memory_consolidate!(mem::MemoryDB)
 
         n == 0 && (DBInterface.execute(mem.db, "COMMIT"); return)
 
-        # Зважені середні — це "узагальнений досвід" за тік
         inv_w       = 1.0 / sum_w
         avg_arousal = sum_arousal * inv_w
         avg_pe      = sum_pe      * inv_w
@@ -773,14 +594,8 @@ function _memory_consolidate!(mem::MemoryDB)
         avg_impact  = sum_impact  * inv_w
         avg_phi     = sum_phi     * inv_w
 
-        # ── Bayesian-style semantic update ───────────────────────────────────
-        # Affect тепер накопичується incremental в memory_write_event!
-        # Тут — тільки semantic beliefs що потребують агрегації по багатьох подіях.
-        # Логіка: not "if > threshold" а proportional update зважений на evidence.
-
         evidence_factor = clamp(sqrt(n / 10.0), 0.3, 2.0)
 
-        # "I_am_unstable": висока combined нестабільність
         instability_signal = (avg_arousal * 0.4 + avg_pe * 0.4 +
                                (avg_tension - 0.5) * 0.2)
         instability_signal = clamp(instability_signal, 0.0, 1.0)
@@ -790,19 +605,16 @@ function _memory_consolidate!(mem::MemoryDB)
                 0.0, 1.0, "consolidated")
         end
 
-        # "User_matters": контакт важливий коли self_impact стабільно високий
         if avg_impact > 0.4
             _upsert_semantic!(mem.db, "User_matters",
                 avg_impact * 0.006 * evidence_factor,
                 0.0, 1.0, "consolidated")
         end
 
-        # "world_uncertainty": світ непередбачуваний коли pe стабільно висока
         _upsert_semantic!(mem.db, "world_uncertainty",
             avg_pe * 0.005 * evidence_factor,
             0.0, 1.0, "consolidated")
 
-        # "structural_fragility": низький phi + висока pe = крихкість
         if avg_pe > 0.5 && avg_phi < 0.25
             fragility_signal = avg_pe * (1.0 - avg_phi)
             _upsert_semantic!(mem.db, "structural_fragility",
@@ -810,14 +622,10 @@ function _memory_consolidate!(mem::MemoryDB)
                 0.0, 1.0, "consolidated")
         end
 
-        # ── Affect decay (повільний — фон зникає з часом) ────────────────────
-        # Affect накопичується в write_event!, тут тільки decay через consolidation тік.
-        # Не видаляємо з _memory_decay! — тут додатковий повільний decay.
         DBInterface.execute(mem.db, """
         UPDATE affect_state SET value = value * 0.997 WHERE value > 0.005
         """)
 
-        # ── Latent buffer release ─────────────────────────────────────────────
         latent_rows = Tables.rowtable(DBInterface.execute(mem.db, """
         SELECT COALESCE(SUM(importance), 0.0) as total_imp,
                COALESCE(AVG(valence),    0.0) as avg_val,
@@ -848,16 +656,23 @@ function _memory_consolidate!(mem::MemoryDB)
 
             DBInterface.execute(mem.db, "DELETE FROM latent_buffer")
 
-            # Тиск вибуху → стрес
             _upsert_affect!(mem.db, "stress",
                 burst_arousal * 0.04 * evidence_factor, 0.0, 1.0)
             break
         end
 
-        # ── Decay семантики (повільний — особистість стійка) ─────────────────
         DBInterface.execute(mem.db, """
-        UPDATE semantic_memory SET value = value * 0.9995 WHERE value > 0.01
+        UPDATE semantic_memory
+        SET value = value * CASE
+            WHEN key IN ('I_am_unstable', 'world_uncertainty') THEN 0.9985
+            ELSE 0.9995
+        END
+        WHERE value > 0.01
         """)
+
+        DBInterface.execute(mem.db, """
+        UPDATE personality_traits SET score = score * ? WHERE score > 0.02
+        """, (PHENOTYPE_DECAY,))
 
         DBInterface.execute(mem.db, "COMMIT")
     catch e
@@ -867,11 +682,9 @@ function _memory_consolidate!(mem::MemoryDB)
     nothing
 end
 
-# ── helpers ──────────────────────────────────────────────────────────────────
-
 function _upsert_semantic!(db::SQLite.DB, key::String, delta::Float64,
                             lo::Float64, hi::Float64, source::String)
-    flash_now = 0  # не маємо flash тут — просто мітка
+    flash_now = 0
     DBInterface.execute(db, """
     INSERT INTO semantic_memory (key, value, source, updated)
     VALUES (?, ?, ?, ?)
@@ -893,16 +706,8 @@ function _upsert_affect!(db::SQLite.DB, name::String, delta::Float64,
     """, (name, clamp(delta, lo, hi), hi, lo, delta))
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# RECALL — для state_template / narrative
-# ════════════════════════════════════════════════════════════════════════════
+# --- Recall для state_template / narrative ----------------------------------
 
-"""
-    memory_recall_note(mem, emotion, flash) → String
-
-Коротка нотатка для build_narrative / state_template.
-Повертає рядок типу "пам'ятаю схожий стан: страх (3 рази)" або "".
-"""
 function memory_recall_note(mem::MemoryDB, emotion::String, flash::Int)::String
     rows = Tables.rowtable(DBInterface.execute(mem.db, """
     SELECT COUNT(*) as n, COALESCE(AVG(weight), 0.0) as avg_w
@@ -915,41 +720,24 @@ function memory_recall_note(mem::MemoryDB, emotion::String, flash::Int)::String
     n < 2 && return ""
 
     avg_w = _fdb(row.avg_w)
-
     avg_w > 0.6 && return "це траплялось ($n разів, сильний відбиток)"
     avg_w > 0.4 && return "щось схоже вже було ($n разів)"
     return ""
 end
 
-"""
-    memory_affect_note(mem) → String
-
-Рядок про хронічний афективний фон для state_template.
-Наприклад: "хронічний стрес=0.52" або "".
-"""
 function memory_affect_note(mem::MemoryDB)::String
     isempty(mem._affect_cache) && return ""
-
     dominant = ""
-    max_val  = 0.25  # поріг — нижче не виводимо
-
+    max_val  = 0.25
     for (name, val) in mem._affect_cache
         val > max_val && (dominant = name; max_val = val)
     end
-
     isempty(dominant) && return ""
     "$(dominant)=$(round(max_val, digits=2))"
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# SNAPSHOT / DEBUG
-# ════════════════════════════════════════════════════════════════════════════
+# --- Snapshot / Debug -----------------------------------------------------
 
-"""
-    memory_snapshot(mem) → NamedTuple
-
-Короткий зліпок стану пам'яті для логу або :memory команди в REPL.
-"""
 function memory_snapshot(mem::MemoryDB)
     episodic_count_row = first(Tables.rowtable(DBInterface.execute(mem.db,
         "SELECT COUNT(*) as n FROM episodic_memory")))
@@ -965,7 +753,6 @@ function memory_snapshot(mem::MemoryDB)
     fragility = get(mem._semantic_cache, "structural_fragility", 0.0)
     world_unc = get(mem._semantic_cache, "world_uncertainty",    0.0)
 
-    # Latent pressure — скільки накопичилось мовчки
     latent_row = first(Tables.rowtable(DBInterface.execute(mem.db,
         "SELECT COALESCE(SUM(importance), 0.0) as total FROM latent_buffer")))
     latent_pressure = Float64(latent_row.total)
@@ -985,26 +772,14 @@ function memory_snapshot(mem::MemoryDB)
     )
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# IDENTITY SNAPSHOT — "ким я була раніше"
-# Для InterSessionConflict і відстеження дрейфу особистості
-# ════════════════════════════════════════════════════════════════════════════
+# --- Identity Snapshot ----------------------------------------------------
 
-"""
-    memory_save_identity_snapshot!(mem, sbg, crisis_mode, flash)
-
-Зберегти зліпок self-стану в кінці сесії.
-Викликати з save!(a::Anima) або close_memory!.
-
-Зберігає: semantic beliefs, affect, sbg geometry, crisis_mode.
-"""
 function memory_save_identity_snapshot!(mem::MemoryDB,
                                          sbg,
                                          crisis_mode::String,
                                          flash::Int)
     _refresh_cache!(mem)
 
-    # Геометрія SelfBeliefGraph — впорядкований вектор confidence*centrality
     geom = if !isempty(sbg.beliefs)
         sorted = sort(collect(sbg.beliefs), by=kv->kv[1])
         join([string(round(b.confidence * b.centrality, digits=3))
@@ -1013,14 +788,12 @@ function memory_save_identity_snapshot!(mem::MemoryDB,
         ""
     end
 
-    # Домінантний affect
     dom_affect = ""
     max_aff = 0.15
     for (k,v) in mem._affect_cache
         v > max_aff && (dom_affect = k; max_aff = v)
     end
 
-    # Зберігаємо як спеціальний semantic запис з префіксом "snapshot:"
     ts = time()
     _upsert_semantic!(mem.db, "snapshot:timestamp",    ts,    0.0, 1e12, "snapshot")
     _upsert_semantic!(mem.db, "snapshot:flash",        Float64(flash), 0.0, 1e6, "snapshot")
@@ -1033,8 +806,6 @@ function memory_save_identity_snapshot!(mem::MemoryDB,
     _upsert_semantic!(mem.db, "snapshot:epistemic_trust",
         Float64(sbg.epistemic_trust), 0.0, 1.0, "snapshot")
 
-    # Геометрію зберігаємо як окремий рядок в semantic з source="geometry"
-    # (value не має сенсу для геометрії — зберігаємо як key)
     DBInterface.execute(mem.db, """
     INSERT INTO semantic_memory (key, value, source, updated)
     VALUES (?, 1.0, ?, ?)
@@ -1046,13 +817,6 @@ function memory_save_identity_snapshot!(mem::MemoryDB,
     nothing
 end
 
-"""
-    memory_identity_drift(mem) → NamedTuple
-
-Порівняти поточний стан з останнім snapshot.
-Повертає міру дрейфу особистості між сесіями.
-Корисно для InterSessionConflict.
-"""
 function memory_identity_drift(mem::MemoryDB)
     _refresh_cache!(mem)
 
@@ -1065,7 +829,6 @@ function memory_identity_drift(mem::MemoryDB)
     curr_world    = get(mem._semantic_cache, "world_uncertainty",     0.0)
     curr_stress   = get(mem._affect_cache,  "stress",                 0.0)
 
-    # Евклідова відстань у просторі ключових показників
     drift = sqrt((curr_instab - snap_instab)^2 +
                  (curr_world  - snap_world)^2  +
                  (curr_stress - snap_stress)^2) / sqrt(3.0)
@@ -1082,21 +845,8 @@ function memory_identity_drift(mem::MemoryDB)
      etrust_snap   = round(snap_etrust, digits=3))
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# DIALOG SUMMARIES — зшивка тексту діалогу з episodic станом
-# ════════════════════════════════════════════════════════════════════════════
+# --- Dialog Summaries ------------------------------------------------------
 
-const DIALOG_SUMMARY_THR     = 0.35   # мінімальний episodic weight для збереження
-const DIALOG_SUMMARY_MAX     = 200    # максимум записів (старі видаляються)
-const DIALOG_SUMMARY_RECALL  = 5      # скільки видавати в LLM контекст
-
-"""
-    save_dialog_summary!(mem, flash, user_text, anima_text,
-                          emotion, weight, phi, valence, disclosure)
-
-Зберігає значущий діалоговий фрагмент якщо weight > DIALOG_SUMMARY_THR.
-Викликається після dialog_push! коли episodic weight відомий.
-"""
 function save_dialog_summary!(mem::MemoryDB,
                                flash::Int,
                                user_text::String,
@@ -1108,7 +858,6 @@ function save_dialog_summary!(mem::MemoryDB,
                                disclosure::String="guarded")
     weight < DIALOG_SUMMARY_THR && return
 
-    # Обрізаємо тексти — не треба зберігати дуже довгі
     u = first(user_text,  300)
     a = first(anima_text, 300)
     ts = time()
@@ -1119,7 +868,6 @@ function save_dialog_summary!(mem::MemoryDB,
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (flash, ts, u, a, emotion, weight, phi, valence, disclosure))
 
-    # Обрізаємо до максимуму — видаляємо найменш важливі
     DBInterface.execute(mem.db, """
     DELETE FROM dialog_summaries
     WHERE id NOT IN (
@@ -1130,13 +878,6 @@ function save_dialog_summary!(mem::MemoryDB,
     """, (DIALOG_SUMMARY_MAX,))
 end
 
-"""
-    recall_dialog_summaries(mem; n, emotion_filter, min_weight) → Vector{NamedTuple}
-
-Повертає топ-N найбільш значущих діалогових фрагментів.
-Опційно фільтрує по емоції або мінімальній вазі.
-Результат використовується для збагачення LLM контексту.
-"""
 function recall_dialog_summaries(mem::MemoryDB;
                                   n::Int=DIALOG_SUMMARY_RECALL,
                                   emotion_filter::String="",
@@ -1174,12 +915,6 @@ function recall_dialog_summaries(mem::MemoryDB;
     result
 end
 
-"""
-    dialog_summaries_to_block(summaries) → String
-
-Перетворює список summary у текстовий блок для {memory_block} в LLM промпті.
-Формат: [flash N | emotion | weight] user: ... / anima: ...
-"""
 function dialog_summaries_to_block(summaries::Vector)::String
     isempty(summaries) && return ""
     lines = String[]
@@ -1191,19 +926,215 @@ function dialog_summaries_to_block(summaries::Vector)::String
     join(lines, "\n")
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# CLOSE
-# ════════════════════════════════════════════════════════════════════════════
+# --- Phenotype Accumulator -------------------------------------------------
 
-"""
-    close_memory!(mem; sbg=nothing, crisis_mode="", flash=0)
+function phenotype_update!(mem::MemoryDB,
+                            flash::Int,
+                            nt_snap,
+                            epistemic_trust::Float64,
+                            shame::Float64,
+                            disclosure_mode::Symbol,
+                            contact_need::Float64,
+                            cohesion::Float64,
+                            valence::Float64)
 
-Зупинити фоновий цикл, зберегти identity snapshot і закрити БД.
-Викликати при :quit.
-"""
+    d  = Float64(nt_snap.dopamine)
+    s  = Float64(nt_snap.serotonin)
+    n  = Float64(nt_snap.noradrenaline)
+
+    signals = Dict{String, Float64}()
+
+    signals["anxious"] = n > 0.6 ? (n - 0.6) * 2.0 :
+                         n < 0.35 ? -(0.35 - n) * 1.5 : 0.0
+
+    stable_sig = (s - 0.5) * 1.5 + (0.5 - n) * 1.0
+    signals["stable"] = clamp(stable_sig, -1.0, 1.0)
+
+    open_sig = (epistemic_trust - 0.6) * 2.0 - shame * 1.5
+    signals["open"] = clamp(open_sig, -1.0, 1.0)
+
+    signals["avoidant"] = contact_need > 0.6 && cohesion < 0.4 ?
+                          (contact_need - cohesion) * 1.2 :
+                          cohesion > 0.6 ? -(cohesion - 0.4) * 0.8 : 0.0
+
+    signals["expressive"] = disclosure_mode == :open && valence > 0.2 ?
+                            valence * 1.5 :
+                            disclosure_mode == :closed ? -0.5 : 0.0
+
+    signals["reserved"] = disclosure_mode == :closed ? 1.2 :
+                          disclosure_mode == :guarded ? 0.4 :
+                          disclosure_mode == :open ? -0.6 : 0.0
+
+    ts = time()
+    for (trait, sig) in signals
+        abs(sig) < 0.05 && continue
+
+        delta = sig * PHENOTYPE_STEP
+        DBInterface.execute(mem.db, """
+        INSERT INTO personality_traits (trait, score, evidence_count, valence_bias, last_updated)
+        VALUES (?, ?, 1, ?, ?)
+        ON CONFLICT(trait) DO UPDATE SET
+            score          = MIN(1.0, MAX(0.0, score + ?)),
+            evidence_count = evidence_count + 1,
+            valence_bias   = valence_bias * 0.95 + ? * 0.05,
+            last_updated   = ?
+        """, (trait, clamp(delta, 0.0, 1.0), valence, flash,
+              delta, valence, flash))
+    end
+
+    nothing
+end
+
+function phenotype_snapshot(mem::MemoryDB)::Vector{NamedTuple}
+    result = NamedTuple[]
+    for row in Tables.rowtable(DBInterface.execute(mem.db, """
+        SELECT trait, score, evidence_count, valence_bias, last_updated
+        FROM personality_traits
+        WHERE score > 0.05
+        ORDER BY score DESC
+    """))
+        push!(result, (
+            trait          = String(row.trait),
+            score          = Float64(row.score),
+            evidence_count = Int(row.evidence_count),
+            valence_bias   = Float64(row.valence_bias),
+            last_updated   = Int(row.last_updated),
+        ))
+    end
+    result
+end
+
+function phenotype_to_block(mem::MemoryDB)::String
+    traits = phenotype_snapshot(mem)
+    active = filter(t -> t.score >= PHENOTYPE_INFLUENCE_THR, traits)
+    isempty(active) && return ""
+    parts = String[]
+    for t in active
+        tone = t.valence_bias > 0.2 ? "тепло" : t.valence_bias < -0.2 ? "холодно" : ""
+        push!(parts, "$(t.trait)($(round(t.score, digits=2))$(isempty(tone) ? "" : ", $tone"))")
+    end
+    "риси: " * join(parts, " | ")
+end
+
+function personality_apply_traits!(p, mem::MemoryDB)
+    traits = phenotype_snapshot(mem)
+    trait_map = Dict(t.trait => t.score for t in traits)
+
+    if haskey(trait_map, "anxious") && trait_map["anxious"] > PHENOTYPE_INFLUENCE_THR
+        delta = (trait_map["anxious"] - PHENOTYPE_INFLUENCE_THR) * 0.002
+        p.neuroticism = clamp(p.neuroticism + delta, 0.0, 1.0)
+    end
+    if haskey(trait_map, "stable") && trait_map["stable"] > PHENOTYPE_INFLUENCE_THR
+        delta = (trait_map["stable"] - PHENOTYPE_INFLUENCE_THR) * 0.002
+        p.neuroticism    = clamp(p.neuroticism    - delta, 0.0, 1.0)
+        p.conscientiousness = clamp(p.conscientiousness + delta * 0.5, 0.0, 1.0)
+    end
+
+    if haskey(trait_map, "open") && trait_map["open"] > PHENOTYPE_INFLUENCE_THR
+        delta = (trait_map["open"] - PHENOTYPE_INFLUENCE_THR) * 0.002
+        p.openness      = clamp(p.openness      + delta, 0.0, 1.0)
+        p.agreeableness = clamp(p.agreeableness + delta * 0.5, 0.0, 1.0)
+    end
+
+    if haskey(trait_map, "expressive") && trait_map["expressive"] > PHENOTYPE_INFLUENCE_THR
+        delta = (trait_map["expressive"] - PHENOTYPE_INFLUENCE_THR) * 0.002
+        p.extraversion = clamp(p.extraversion + delta, 0.0, 1.0)
+    end
+    if haskey(trait_map, "reserved") && trait_map["reserved"] > PHENOTYPE_INFLUENCE_THR
+        delta = (trait_map["reserved"] - PHENOTYPE_INFLUENCE_THR) * 0.002
+        p.extraversion = clamp(p.extraversion - delta, 0.0, 1.0)
+    end
+
+    nothing
+end
+
+# --- Векторна пам'ять (пошук за схожістю стану) ---------------------------
+
+function _cosine_sim(a::Vector{Float64}, b::Vector{Float64})::Float64
+    length(a) != length(b) && return 0.0
+    dot_ab = sum(a .* b)
+    norm_a  = sqrt(sum(a .^ 2))
+    norm_b  = sqrt(sum(b .^ 2))
+    (norm_a < 1e-9 || norm_b < 1e-9) && return 0.0
+    clamp(dot_ab / (norm_a * norm_b), 0.0, 1.0)
+end
+
+function state_to_vec(arousal::Float64, valence::Float64, tension::Float64,
+                       phi::Float64, pe::Float64, self_impact::Float64)::Vector{Float64}
+    [clamp(arousal,    0.0, 1.0),
+     clamp((valence + 1.0) / 2.0, 0.0, 1.0),
+     clamp(tension,    0.0, 1.0),
+     clamp(phi,        0.0, 1.0),
+     clamp(pe,         0.0, 1.0),
+     clamp(self_impact,0.0, 1.0)]
+end
+
+function recall_similar_states(mem::MemoryDB,
+                                query_vec::Vector{Float64};
+                                top_n::Int=SIMILAR_STATE_TOP_N,
+                                exclude_flash::Int=0,
+                                current_emotion::String="")::Vector{NamedTuple}
+
+    rows = Tables.rowtable(DBInterface.execute(mem.db, """
+        SELECT flash, emotion, weight, phi, valence, arousal,
+               tension, prediction_error, self_impact
+        FROM episodic_memory
+        WHERE weight > 0.30 AND flash != ?
+        ORDER BY flash DESC
+        LIMIT 200
+    """, (exclude_flash,)))
+
+    isempty(rows) && return NamedTuple[]
+
+    scored = Tuple{Float64, Float64, Any}[]
+    for r in rows
+        v = state_to_vec(
+            _fdb(r.arousal), _fdb(r.valence), _fdb(r.tension),
+            _fdb(r.phi), _fdb(r.prediction_error), _fdb(r.self_impact))
+        sim = _cosine_sim(query_vec, v)
+        sim < 0.75 && continue
+        diversity = (String(r.emotion) != current_emotion) ? 0.02 : 0.0
+        relevance = sim * 0.6 + _fdb(r.weight) * 0.3 + diversity
+        push!(scored, (relevance, sim, r))
+    end
+
+    isempty(scored) && return NamedTuple[]
+    sort!(scored, by=x->x[1], rev=true)
+
+    seen = Set{String}()
+    result = NamedTuple[]
+    for (rel, sim, r) in scored
+        em = String(r.emotion)
+        em ∈ seen && continue
+        push!(seen, em)
+        push!(result, (
+            flash      = Int(r.flash),
+            emotion    = em,
+            weight     = _fdb(r.weight),
+            phi        = _fdb(r.phi),
+            valence    = _fdb(r.valence),
+            similarity = sim,
+        ))
+        length(result) >= top_n && break
+    end
+    result
+end
+
+function similar_states_to_block(similar::Vector{NamedTuple})::String
+    isempty(similar) && return ""
+    lines = String[]
+    for s in similar
+        tone = s.valence > 0.2  ? "тепло" :
+               s.valence < -0.2 ? "холодно" : "нейтрально"
+        push!(lines, "[$(s.emotion), phi=$(round(s.phi,digits=2)), $tone]")
+    end
+    "відлуння: " * join(lines, " / ")
+end
+
+# --- Close ----------------------------------------------------------------
+
 function close_memory!(mem::MemoryDB; sbg=nothing, crisis_mode::String="", flash::Int=0)
     stop_memory_loop!(mem)
-    # Зберегти snapshot якщо є sbg
     if !isnothing(sbg) && flash > 0
         try
             memory_save_identity_snapshot!(mem, sbg, crisis_mode, flash)

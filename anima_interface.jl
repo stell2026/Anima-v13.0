@@ -1,17 +1,13 @@
-#=
-╔══════════════════════════════════════════════════════════════════════════════╗
-║                    A N I M A  —  Interface  (Julia)                          ║
-║                                                                              ║
-║  Тут все що показує стан — жодного side effect на психіку.                   ║
-║                                                                              ║
-║  Anima               — головна структура + experience! loop                  ║
-║  build_narrative      — внутрішній голос з поточного стану                   ║
-║  log_flash            — термінальний дебаг-рядок                             ║
-║  llm_call             — асинхронний виклик LLM (не блокує психіку)           ║
-║  text_to_stimulus     — текст → стимул без LLM                               ║
-║  repl!                — інтерактивний REPL                                   ║
-╚══════════════════════════════════════════════════════════════════════════════╝
-=#
+# A N I M A  —  Interface  (Julia)
+#
+# Відображення стану, без побічних ефектів на психіку.
+#
+#  Anima               — головна структура + experience! loop
+#  build_narrative      — внутрішній голос з поточного стану
+#  log_flash            — термінальний дебаг-рядок
+#  llm_call             — асинхронний виклик LLM (не блокує психіку)
+#  text_to_stimulus     — текст → стимул без LLM
+#  repl!                — інтерактивний REPL
 
 using HTTP
 using JSON3
@@ -19,55 +15,31 @@ using Printf
 using LinearAlgebra
 
 # Підключаємо всі шари — порядок важливий
-# @__DIR__ на верхньому рівні файлу завжди вказує на директорію цього файлу
 include(joinpath(@__DIR__, "anima_core.jl"))
 include(joinpath(@__DIR__, "anima_psyche.jl"))
 include(joinpath(@__DIR__, "anima_self.jl"))
 include(joinpath(@__DIR__, "anima_crisis.jl"))
 
-# anima_input_llm.jl необов'язковий — якщо відсутній, fallback на text_to_stimulus
+# anima_input_llm.jl необов'язковий — fallback на text_to_stimulus
 let _input_llm_path = joinpath(@__DIR__, "anima_input_llm.jl")
     if isfile(_input_llm_path)
         include(_input_llm_path)
     else
-        @warn "anima_input_llm.jl не знайдено — використовується text_to_stimulus fallback (use_input_llm буде ігноруватись)"
-        # Stub-функції щоб repl! не падав при use_input_llm=true
+        @warn "anima_input_llm.jl не знайдено — використовується text_to_stimulus fallback"
         process_input(text::String, fallback_fn; kwargs...) = (fallback_fn(text), "fallback", "")
         input_source_label(src::String) = src == "fallback" ? "[rule]" : "[llm]"
     end
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# AUTHENTICITY MONITOR (phase 5)
-#
-# Система сама оцінює наскільки відповідь відповідає стану.
-# Залежить від: phi, crisis_mode, GoalConflict (фаза 2), LatentBuffer (фаза 3).
-#
-# Принцип:
-#   Довга відповідь при низькому phi + DISINTEGRATED → coherence_overreach.
-#   Theater-words без підтримки в стані → fabrication_risk.
-#   fabrication_risk передається в наступний state_template — self-correcting loop.
-#   AuthenticityMonitor ФІКСУЄ — але не виправляє.
-#   Виправлення було б брехнею.
-# ════════════════════════════════════════════════════════════════════════════
-
+# --- Authenticity Monitor (phase 5) -----------------------------------
 mutable struct AuthenticityMonitor
-    authenticity_drift::Float64   # наскільки відповідь дрейфує від стану
-    fabrication_risk::Float64     # ризик що система "виробляє" а не "відчуває"
-    narrative_overreach::Float64  # наратив виходить за межі реального стану
-    last_flags::Vector{String}    # що саме спрацювало в останньому флеші
+    authenticity_drift::Float64
+    fabrication_risk::Float64
+    narrative_overreach::Float64
+    last_flags::Vector{String}
 end
 AuthenticityMonitor() = AuthenticityMonitor(0.0, 0.0, 0.0, String[])
 
-"""
-    check_authenticity!(am, phi, crisis_mode, gc_snap, lb_snap, ur_snap,
-                         coherence, epistemic_trust, response_length)
-
-Оновлює AuthenticityMonitor на основі поточного стану.
-Повертає (fabrication_risk, flags, note) для state_template наступного флешу.
-
-response_length — довжина narrative рядка (приблизна міра наскільки "багато" сказано).
-"""
 function check_authenticity!(am::AuthenticityMonitor,
                               phi::Float64,
                               crisis_mode::String,
@@ -81,7 +53,7 @@ function check_authenticity!(am::AuthenticityMonitor,
     flags = String[]
     am.last_flags = String[]
 
-    # ── Евристика 1: coherence_overreach ─────────────────────────────────
+    # Coherence overreach
     is_disintegrated = crisis_mode == "дезінтегрована"
     long_response    = response_length > 120
     low_phi          = phi < 0.25
@@ -93,7 +65,7 @@ function check_authenticity!(am::AuthenticityMonitor,
         am.narrative_overreach = clamp01(am.narrative_overreach - 0.04)
     end
 
-    # ── Евристика 2: fabrication_risk ────────────────────────────────────
+    # Fabrication risk
     conflict_unresolved = gc_snap.active && gc_snap.resolution == "unresolved"
     latent_breakthrough = lb_snap.breakthrough
     low_coherence       = coherence < 0.35
@@ -107,7 +79,7 @@ function check_authenticity!(am::AuthenticityMonitor,
     am.fabrication_risk = clamp01(am.fabrication_risk * 0.75 + fabrication_signal * 0.25)
     am.fabrication_risk > 0.45 && push!(flags, "fabrication_risk")
 
-    # ── Евристика 3: authenticity_drift ──────────────────────────────────
+    # Authenticity drift
     unknown_high = ur_snap.dominant_val > 0.5
     unknown_high && long_response &&
         (am.authenticity_drift = clamp01(am.authenticity_drift + 0.12))
@@ -115,18 +87,13 @@ function check_authenticity!(am::AuthenticityMonitor,
         (am.authenticity_drift = clamp01(am.authenticity_drift - 0.03))
     am.authenticity_drift > 0.4 && push!(flags, "authenticity_drift")
 
-    # ── Евристика 4: state_narrative_mismatch ────────────────────────────
-    # Якщо phi > 0.6 і etrust > 0.6 але named = негативний стан — розрив.
-    # Якщо phi < 0.3 і etrust < 0.4 але narrative каже "спокій" — теж розрив.
-    # Це саме та ситуація: Довіра + phi=0.82 + "не можу собі довіряти".
+    # State-narrative mismatch
     high_integration = phi > 0.6 && epistemic_trust > 0.6
     negative_state   = crisis_mode ∈ ("дезінтегрована", "фрагментована") &&
                        coherence < 0.45
     if high_integration && !negative_state && am.fabrication_risk < 0.3
-        # Система стабільна — знижуємо drift якщо він накопичився
         am.authenticity_drift = max(0.0, am.authenticity_drift - 0.05)
     elseif !high_integration && coherence < 0.35
-        # Система нестабільна але може говорити більше ніж відчуває
         am.authenticity_drift = clamp01(am.authenticity_drift + 0.08)
         push!(flags, "state_narrative_mismatch")
     end
@@ -163,10 +130,7 @@ function am_from_json!(am::AuthenticityMonitor, d::AbstractDict)
     am.narrative_overreach = Float64(get(d, "narrative_overreach", 0.0))
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# ANIMA — головна структура
-# ════════════════════════════════════════════════════════════════════════════
-
+# --- Anima – головна структура ---------------------------------------
 mutable struct Anima
     # Core
     personality::Personality
@@ -201,27 +165,20 @@ mutable struct Anima
     fatigue::FatigueSystem
     regression::StressRegression
     metacognition::Metacognition
-    # SignificanceLayer (phase 1)
     sig_layer::SignificanceLayer
-    # GoalConflict (phase 2)
     goal_conflict::GoalConflict
-    # LatentBuffer + StructuralScars (phase 3)
     latent_buffer::LatentBuffer
     structural_scars::StructuralScars
-    # UnknownRegister (phase 4)
     unknown_register::UnknownRegister
-    # AuthenticityMonitor (phase 5)
     authenticity_monitor::AuthenticityMonitor
-    # InnerDialogue (phase C)
     inner_dialogue::InnerDialogue
-    # ShadowRegistry (phase C2)
     shadow_registry::ShadowRegistry
-    # Self (anima_self.jl)
+    # Self
     sbg::SelfBeliefGraph
     spm::SelfPredictiveModel
     agency::AgencyLoop
     isc::InterSessionConflict
-    # Crisis (anima_crisis.jl)
+    # Crisis
     crisis::CrisisMonitor
     # State
     flash_count::Int
@@ -256,8 +213,7 @@ function Anima(; personality=Personality(), values=ValueSystem(),
                  a.latent_buffer, a.structural_scars,
                  a.shadow_registry, a.inner_dialogue)
     a.flash_count = saved
-    # FIX #1: завантажити self/crisis стан (sbg, spm, agency, isc, crisis)
-    # Раніше цей файл зберігався але ніколи не читався — self-модель скидалась кожну сесію.
+    # Завантажити self/crisis стан
     _self_path = replace(psyche_mem_path, "psyche" => "self")
     if isfile(_self_path)
         try
@@ -275,8 +231,7 @@ function Anima(; personality=Personality(), values=ValueSystem(),
             println("  [SELF] Помилка завантаження: $e")
         end
     end
-    # Завантаження anima_latent.json (фаза B — latent_buffer і structural_scars
-    # зберігаються фоновим процесом окремо для уникнення конкурентного запису)
+    # Завантаження anima_latent.json
     _latent_path = replace(psyche_mem_path, "psyche" => "latent")
     if isfile(_latent_path)
         try
@@ -291,8 +246,7 @@ function Anima(; personality=Personality(), values=ValueSystem(),
     end
     init_session!(a.temporal)
     apply_to_nt!(a.temporal, a.nt)
-    # FIX #4: check_session_conflict тепер викликається ПІСЛЯ завантаження self.json,
-    # щоб порівнювати реальну минулу геометрію, а не порожній свіжий граф.
+    # Перевірка конфліктів між сесіями
     current_geom = belief_geometry(a.sbg)
     isc_result = check_session_conflict!(a.isc, current_geom)
     if isc_result.rupture
@@ -311,7 +265,7 @@ function save!(a::Anima; summary="", verbose=false)
                  a.significance, a.moral, a.fatigue, a.sig_layer, a.goal_conflict,
                  a.latent_buffer, a.structural_scars,
                  a.shadow_registry, a.inner_dialogue)
-    # Save self/crisis state
+    # Зберегти self/crisis
     self_path = replace(a.psyche_mem_path, "psyche" => "self")
     self_data = Dict("sbg"=>sbg_to_json(a.sbg),"spm"=>spm_to_json(a.spm),
                      "agency"=>al_to_json(a.agency),"isc"=>isc_to_json(a.isc),
@@ -319,22 +273,18 @@ function save!(a::Anima; summary="", verbose=false)
                      "unknown_register"=>ur_to_json(a.unknown_register),
                      "authenticity_monitor"=>am_to_json(a.authenticity_monitor))
     open(self_path,"w") do f; JSON3.write(f,self_data); end
-    # Save geometry for inter-session conflict
     save_session_geometry!(a.isc, belief_geometry(a.sbg))
     verbose && println("  [ANIMA] Збережено. Спалахів: $(a.flash_count).")
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# EXPERIENCE! — один крок психіки
-# ════════════════════════════════════════════════════════════════════════════
-
+# --- experience! ------------------------------------------------------
 function experience!(a::Anima, stimulus_raw::Dict{String,Float64};
                      user_message::String="")
 
     a.flash_count += 1
     stim = copy(stimulus_raw)
 
-    # Social mirror → adjust stimulus
+    # Social mirror
     if !isempty(user_message)
         for (k,v) in social_delta(user_message)
             stim[k] = get(stim,k,0.0) + v*0.15
@@ -360,28 +310,18 @@ function experience!(a::Anima, stimulus_raw::Dict{String,Float64};
 
     # Attention narrowing
     attn_snap = update_attention!(a.attention, a.nt, t)
-    # Фільтрація всього stimulus пропорційно до attention radius.
-    # Логіка: вузька увага = фокус на загрозі, ігнорування позитивного.
-    #   • Некритичні позитивні сигнали (satisfaction>0, cohesion>0) → послаблені
-    #   • Загрозливі сигнали (tension>0, негативні) → підсилені через threat_amplifier
-    #   • При radius=1.0 — жодних змін (широка відкрита увага)
     if attn_snap.radius < 0.99
         r   = attn_snap.radius
-        amp = Float64(attn_snap.threat_amplifier)   # 1.0..1.5
+        amp = Float64(attn_snap.threat_amplifier)
         for k in keys(stim)
             v = stim[k]
             if k in ("satisfaction","cohesion") && v > 0.0
-                # Позитивні некритичні — послаблюємо пропорційно
                 stim[k] = v * r
             elseif k == "tension" && v > 0.0
-                # Загроза — підсилюємо (але не вище 1.0)
                 stim[k] = clamp(v * amp, -1.0, 1.0)
             elseif k == "arousal" && v > 0.0
-                # Збудження — помірне підсилення
                 stim[k] = clamp(v * (1.0 + (1.0-r)*0.3), -1.0, 1.0)
             end
-            # Від'ємні satisfaction/cohesion (втрата зв'язку, незадоволення)
-            # теж підсилюємо — під стресом ми гостріше відчуваємо відсутність
             if k in ("satisfaction","cohesion") && v < 0.0
                 stim[k] = clamp(v * amp, -1.0, 1.0)
             end
@@ -396,12 +336,12 @@ function experience!(a::Anima, stimulus_raw::Dict{String,Float64};
     learn!(a.emotion_map, primary, vad)
     decay_toward_base!(a.emotion_map)
 
-    # IIT φ_prior — prior beliefs про себе ДО повного досвіду
+    # IIT φ_prior
     phi_prior = compute_phi(a.iit, vad, t, c,
                             a.sbg.attractor_stability,
                             a.sbg.epistemic_trust,
                             a.interoception.allostatic_load)
-    phi = phi_prior  # alias для ранніх модулів
+    phi = phi_prior
 
     # Predictive
     pred = update_predictor!(a.predictor, vad, surprise_sensitivity(a.personality))
@@ -433,53 +373,47 @@ function experience!(a::Anima, stimulus_raw::Dict{String,Float64};
     ep_def = activate_epistemic!(a.epistemic_defense, diss.level,
                                   a.shame.level, fat, a.moral.agency)
 
-    # Symptom (affect на reactors)
+    # Symptom
     symptom  = generate_symptom!(a.symptomogenesis, a.shadow.content, defense)
-    sym_fx   = symptom_reactor_delta(symptom)  # (dt, da, ds, dc)
+    sym_fx   = symptom_reactor_delta(symptom)
     t_adj    = clamp01(t_adj + sym_fx[1]); s_adj = clamp01(s + sym_fx[3])
     c_adj    = clamp01(c + sym_fx[4])
 
     # Chronified
     update_chronified!(a.chronified, s_adj, c_adj, t_adj, a.moral.agency)
 
-    # Significance (IntrinsicSignificance — скільки)
+    # Significance
     update_significance!(a.significance, named, intensity, phi, a.flash_count)
 
     # Moral
     update_moral!(a.moral, named, isnothing(intent) ? "drive" : intent.origin,
                   diss.level, a.values.integrity)
 
-    # ── Active Inference Core ────────────────────────────────────────────
+    # Active Inference Core
     update_precision!(a.gen_model, pred.error, fat)
     posterior = update_beliefs!(a.gen_model, vad)
-    # FIX A: запобігти collapse prior→posterior (VFE=0.00 назавжди)
     prevent_prior_collapse!(a.gen_model)
     vfe_r     = compute_vfe(a.gen_model, vad)
 
-    # SignificanceLayer (phase 1) — якого типу потреба зараз
-    # Розміщено після vfe_r — потребує vfe_r.vfe
+    # SignificanceLayer
     sl_snap = assess_significance!(a.sig_layer, stim, t_adj, a_r, s_adj, c_adj,
                                    vfe_r.vfe, pred.error, phi)
 
-    # GoalConflict (phase 2) — що конфліктує між потребами
-    # sl_snap вже містить актуальні значення всіх потреб
+    # GoalConflict
     gc_snap = update_goal_conflict!(a.goal_conflict, sl_snap,
                                     t_adj, s_adj, c_adj, phi, a.flash_count)
 
-    # LatentBuffer + StructuralScars (phase 3) — відкладені реакції і шрами
+    # LatentBuffer + StructuralScars
     lb_snap = update_latent!(a.latent_buffer, gc_snap,
                               t_adj, c_adj, s_adj, a.shame.level, a.flash_count)
-    # Прорив: реєструємо шрам і застосовуємо delta до NT (з послабленням від шраму)
     if lb_snap.breakthrough
         _ = register_breakthrough!(a.structural_scars, lb_snap.breakthrough_type,
                                           a.flash_count)
         decay_scars!(a.structural_scars)
-        # Шрам послаблює прорив — система вчиться блокувати болючі теми
         attenuation = 1.0 - scar_attenuation(a.structural_scars, lb_snap.breakthrough_type)
         for (k, v) in lb_snap.delta
             apply_stimulus!(a.nt, Dict{String,Float64}(k => v * attenuation))
         end
-        # Перераховуємо реактори після прориву
         t_adj = clamp01(to_reactors(a.nt)[1])
         s_adj = clamp01(to_reactors(a.nt)[3])
         c_adj = clamp01(to_reactors(a.nt)[4])
@@ -491,18 +425,18 @@ function experience!(a::Anima, stimulus_raw::Dict{String,Float64};
     update_blanket!(a.blanket, t_adj, a_r, s_adj, c_adj)
     homeo_snap= update_homeostasis!(a.homeostasis, vad)
 
-    # [B3] Interoception
+    # Interoception
     intero_snap = update_interoception!(a.interoception, a.body, a.gen_model.prior_mu)
 
-    # ── φ_posterior — ПІСЛЯ VFE і interoception ──────────────────────────
+    # φ_posterior
     phi_posterior = compute_phi_posterior(a.iit, vad,
                                           a.sbg.epistemic_trust,
                                           a.blanket.integrity,
                                           vfe_r.vfe,
                                           Float64(intero_snap.intero_error))
-    phi = phi_posterior  # решта pipeline використовує posterior
+    phi = phi_posterior
 
-    # φ feedback loop
+    # φ feedback
     phi_delta = phi_posterior - phi_prior
     if abs(phi_delta) > 0.05
         trust_correction = clamp(phi_delta * 0.08, -0.04, 0.04)
@@ -516,7 +450,7 @@ function experience!(a::Anima, stimulus_raw::Dict{String,Float64};
     s_adj  = clamp01(s_adj + grav_d.satisfaction_d)
     c_adj  = clamp01(c_adj + grav_d.cohesion_d)
 
-    # [T3] Anticipatory
+    # Anticipatory
     ac_snap = update_anticipation!(a.anticipatory, named, t_adj, a_r, s_adj, c_adj, phi)
     t_adj   = clamp01(t_adj + ac_snap.tension_d)
     s_adj   = clamp01(s_adj + ac_snap.satisfaction_d)
@@ -530,31 +464,26 @@ function experience!(a::Anima, stimulus_raw::Dict{String,Float64};
                          fatigue_p=round(Int,fat*3), regression_l=a.regression.level÷2,
                          shame_p=shame_p)
 
-    # [B4] Existential Anchor
+    # Existential Anchor
     anchor_snap = update_anchor!(a.anchor, "$(named) φ=$(round(phi,digits=2))",
                                   a.flash_count, a.temporal.gap_seconds, phi,
                                   a.body.gut_feeling, a.heartbeat.hrv)
 
-    # ── Self Module (anima_self.jl) ──────────────────────────────────────
-    # Register intent before evaluating agency
+    # Self Module
     if !isnothing(intent)
         register_intent!(a.agency, intent.goal, vad, a.gen_model.posterior_mu)
     end
-    # FIX #3: current_intent аргумент видалено (register_intent! вже встановив al.current_intent)
     self_snap = update_self!(a.sbg, a.spm, a.agency, vad, a.gen_model, a.flash_count)
 
-    # ── Crisis Module (anima_crisis.jl) ──────────────────────────────────
+    # Crisis Module
     crisis_snap = update_crisis!(a.crisis, a.sbg, a.blanket, vfe_r.vfe, phi,
                                   self_snap.self_pred.error, a.flash_count)
-    # Apply crisis effects to gen_model and attention
     apply_crisis_to_gm!(a.gen_model, crisis_snap.params)
     apply_crisis_to_attention!(a.attention, crisis_snap.params)
     apply_crisis_noise_to_beliefs!(a.sbg, crisis_snap.params)
-    # Neutralize preferred_vad during disintegration
     a.gen_model.preferred_vad = effective_preferred_vad(a.homeostasis, crisis_snap.mode)
 
-    # UnknownRegister (phase 4) — конкретні типи невизначеності
-    # Розміщено після self_snap і crisis_snap — потребує їхніх значень
+    # UnknownRegister
     ur_snap = update_unknown!(a.unknown_register,
                                vfe_r.vfe,
                                self_snap.agency.agency_confidence,
@@ -563,12 +492,8 @@ function experience!(a::Anima, stimulus_raw::Dict{String,Float64};
                                pred.error,
                                a.flash_count)
 
-    # AuthenticityMonitor (phase 5) — чи відповідь відповідає стану
-    # response_length: довжина narrative як проксі для "скільки сказано"
-    # Narrative будується нижче — тут використовуємо попередній стан am
-    # (самокоригувальний loop: am з попереднього флешу впливає на LLM → LLM відповідає
-    #  → наступний флеш оцінює і передає оновлений am в наступний state_template)
-    _prev_narrative_len = length(a.anchor.last_self)  # приблизна міра попередньої відповіді
+    # AuthenticityMonitor
+    _prev_narrative_len = length(a.anchor.last_self)
     am_snap = check_authenticity!(a.authenticity_monitor,
                                    phi, crisis_snap.mode_name,
                                    gc_snap, lb_snap, ur_snap,
@@ -576,7 +501,7 @@ function experience!(a::Anima, stimulus_raw::Dict{String,Float64};
                                    self_snap.sbg.epistemic_trust,
                                    _prev_narrative_len)
 
-    # InnerDialogue (phase C) — фільтр що виходить назовні
+    # InnerDialogue
     id_snap = update_inner_dialogue!(a.inner_dialogue,
                                      phi,
                                      Int(a.crisis.current_mode),
@@ -584,19 +509,15 @@ function experience!(a::Anima, stimulus_raw::Dict{String,Float64};
                                      a.shame.level,
                                      gc_snap.tension,
                                      vfe_r.vfe,
-                                     lb_snap.breakthrough)
+                                     lb_snap.breakthrough;
+                                     contact_need=Float64(a.sig_layer.contact_need))
 
-    # ShadowRegistry (phase C2) — оновлюємо тінь і перевіряємо прорив
-    # Увага: push_shadow! викликається всередині build_narrative (через apply_inner_dialogue)
-    # тут тільки update (перерахунок pressure + можливий прорив)
+    # ShadowRegistry
     sr_snap = update_shadow!(a.shadow_registry, a.flash_count)
-
-    # Опосередкований вплив тіні на NT якщо pressure висока
     if sr_snap.pressure > 0.35
         s_delta, t_delta = apply_shadow_pressure!(
             a.nt.serotonin, gc_snap.tension, sr_snap.pressure)
         a.nt.serotonin = clamp01(a.nt.serotonin + s_delta)
-        # gc_snap не мутабельний — але вплив відчується в наступному флеші через NT
     end
 
     # Memory + imprint
@@ -611,14 +532,11 @@ function experience!(a::Anima, stimulus_raw::Dict{String,Float64};
     _fp_idx = findfirst(p->p[1]<=a.flash_count<=p[2], _FLASH_PHASES)
     fp = _fp_idx !== nothing ? _FLASH_PHASES[_fp_idx] : (0,0,"?","—")
 
-    # Compose result (NamedTuple для type stability)
     result = (
         flash_count   = a.flash_count,
         flash_phase   = fp[3],
         flash_note    = fp[4],
-        # FIX B: intent diagnostics
         intent_label  = isnothing(intent) ? "—" : intent.goal,
-        # FIX A: VFE drift — наскільки prior відійшов від posterior
         vfe_drift     = Float64(norm(a.gen_model.prior_mu .- a.gen_model.posterior_mu)),
         primary       = named,
         primary_raw   = primary,
@@ -699,18 +617,11 @@ function experience!(a::Anima, stimulus_raw::Dict{String,Float64};
     )
 
     log_flash(result)
-
-    # ── Автозбереження після кожної взаємодії ───────────────────────────────
-    save!(a)  # тихо, без println
-    # ────────────────────────────────────────────────────────────────────────
-
+    save!(a)  # автозбереження
     result
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# NARRATIVE BUILDER — жодного side effect
-# ════════════════════════════════════════════════════════════════════════════
-
+# --- build_narrative --------------------------------------------------
 function build_narrative(a::Anima, named::String, t::Float64, ar::Float64,
                           s::Float64, c::Float64, phi::Float64,
                           ac_snap, vfe::Float64, grav_field,
@@ -721,12 +632,10 @@ function build_narrative(a::Anima, named::String, t::Float64, ar::Float64,
 
     base = t>0.7 ? "Відчуваю напругу. $named." : t<0.2 ? "Спокійно. $named." : "$named."
 
-    # ── Internal Digestion Mode ───────────────────────────────────────────
     if !isnothing(id_snap) && id_snap.digestion
         return base * " " * digestion_note(a.flash_count)
     end
 
-    # ── Збираємо всі потенційні ноти з категоріями ───────────────────────
     raw_notes = Tuple{Symbol,String}[]
 
     !isempty(a.temporal.subjective_note)  && push!(raw_notes, (:always,  a.temporal.subjective_note))
@@ -783,10 +692,9 @@ function build_narrative(a::Anima, named::String, t::Float64, ar::Float64,
         push!(raw_notes, (:open_only, "Важко сказати — моє чи зовнішнє."))
     end
 
-    # ── Застосовуємо фільтр InnerDialogue ────────────────────────────────
+    # InnerDialogue filter
     filtered = if !isnothing(id_snap)
         passed, suppressed = apply_inner_dialogue(id_snap, raw_notes)
-        # Передаємо придушений матеріал у ShadowRegistry
         for (cat, text, weight) in suppressed
             push_shadow!(a.shadow_registry, cat, text, weight, a.flash_count)
         end
@@ -795,8 +703,6 @@ function build_narrative(a::Anima, named::String, t::Float64, ar::Float64,
         [text for (_, text) in raw_notes]
     end
 
-    # ── Shadow прорив — додається в кінці narrative ───────────────────────
-    # sr_snap вже оновлений до виклику build_narrative (в experience!)
     if !isnothing(sr_snap) && sr_snap.breakthrough && !isempty(sr_snap.text)
         push!(filtered, sr_snap.text)
     end
@@ -804,14 +710,10 @@ function build_narrative(a::Anima, named::String, t::Float64, ar::Float64,
     isempty(filtered) ? base : base*" "*join(filter(!isempty, filtered), " ")
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# LOG — виводить на екран, не змінює стан
-# ════════════════════════════════════════════════════════════════════════════
-
+# --- log_flash --------------------------------------------------------
 function log_flash(r)
     goal_str = isnothing(r.defense) ? "—" : r.defense.mechanism
     ep_str   = isnothing(r.ep_defense) ? "" :
-               # FIX: safe_first замість [1:4]
                " 🌀$(safe_first(String(r.ep_defense.bias),4))"
     sym_str  = isnothing(r.symptom) ? "" : " 💊"
     def_str  = isnothing(r.defense) ? "" : " 🛡$(r.defense.mechanism)"
@@ -831,7 +733,6 @@ function log_flash(r)
     @printf("       Self: spe=%.2f agency=%.2f stab=%.2f etrust=%.2f | Crisis: [%s] coh=%.2f\n",
         r.self_pred_error, r.self_agency, r.sbg_stability, r.sbg_epistemic,
         r.crisis_mode, r.crisis_coherence)
-    # InnerDialogue disclosure mode
     if hasfield(typeof(r), :inner_dialogue) && !isnothing(r.inner_dialogue)
         id = r.inner_dialogue
         dg = id.digestion ? " [⚙ digest]" : ""
@@ -841,15 +742,11 @@ function log_flash(r)
         @printf("       Disclosure: [%s] thr=%.2f%s%s\n",
             String(id.mode), id.threshold, dg, sr_str)
     end
-    # FIX B: показуємо intent і VFE drift для діагностики
     hasfield(typeof(r), :intent_label) &&
         @printf("       intent=%-20s vfe_drift=%.3f\n", r.intent_label, r.vfe_drift)
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# TEXT → STIMULUS (без LLM)
-# ════════════════════════════════════════════════════════════════════════════
-
+# --- text_to_stimulus -------------------------------------------------
 const TEXT_PATTERNS = [
     (["боюсь","страшно","тривога","небезпечно","загрожує"], "tension",      0.3),
     (["спокійно","безпечно","добре","мирно"],               "tension",     -0.2),
@@ -870,18 +767,10 @@ function text_to_stimulus(text::AbstractString)::Dict{String,Float64}
     d
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# DIALOG HISTORY — збереження/завантаження розмови
-# ════════════════════════════════════════════════════════════════════════════
+# --- Dialog history ---------------------------------------------------
+const DIALOG_KEEP = 1000
+const DIALOG_CTX  = 40
 
-# DIALOG_KEEP: скільки реплік зберігати у файлі (довгострокова пам'ять)
-# DIALOG_CTX:  скільки з них передавати в LLM за один запит (контекстне вікно)
-# Раніше був тільки один DIALOG_MAX=40, але файл тихо накопичував всі репліки
-# без обрізання — розбіжність між тим що зберігається і тим що читається.
-const DIALOG_KEEP = 1000  # реплік у файлі
-const DIALOG_CTX  = 40   # реплік у LLM контексті
-
-"""Завантажити історію з anima_dialog.json. Повертає Vector{Dict}."""
 function dialog_load(path::String)::Vector{Dict{String,String}}
     isfile(path) || return Dict{String,String}[]
     try
@@ -893,7 +782,6 @@ function dialog_load(path::String)::Vector{Dict{String,String}}
     end
 end
 
-"""Зберегти історію у файл. Обрізає до DIALOG_KEEP перед записом."""
 function dialog_save(path::String, history::Vector{Dict{String,String}})
     try
         to_write = length(history) > DIALOG_KEEP ? history[end-DIALOG_KEEP+1:end] : history
@@ -903,26 +791,17 @@ function dialog_save(path::String, history::Vector{Dict{String,String}})
     end
 end
 
-"""Додати репліку до історії та одразу зберегти."""
 function dialog_push!(history::Vector{Dict{String,String}},
                       path::String, role::String, content::String)
     push!(history, Dict{String,String}("role"=>role, "content"=>content))
     dialog_save(path, history)
 end
 
-"""Останні n реплік для передачі в LLM (default = DIALOG_CTX)."""
 function dialog_context(history::Vector{Dict{String,String}}, n::Int=DIALOG_CTX)
     length(history) <= n ? history : history[end-n+1:end]
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# LLM BRIDGE — читає промпти з llm/*.txt, не хардкодить їх у коді
-# ════════════════════════════════════════════════════════════════════════════
-
-"""
-Прочитати txt-файл відносно директорії anima_interface.jl.
-Якщо файл не знайдено — повертає fallback рядок і пише попередження.
-"""
+# --- LLM bridge -------------------------------------------------------
 function read_text_file(rel_path::String; fallback::String="")::String
     base = @__DIR__
     full = joinpath(base, rel_path)
@@ -934,22 +813,8 @@ function read_text_file(rel_path::String; fallback::String="")::String
     end
 end
 
-"""
-    build_identity_block(a, mem_db) → String
-
-Збирає живий identity блок з усіх шарів пам'яті:
-  - SelfBeliefGraph (ім'я, core beliefs)
-  - semantic_memory (довгострокові переконання)
-  - emerged_beliefs топ-3 по strength
-  - dialog_summaries топ-2 по weight (значущі моменти)
-
-Передається в {identity_block} в state_template.txt.
-LLM знає хто вона є не з статичного файлу а з живої пам'яті.
-"""
 function build_identity_block(a::Anima, mem_db=nothing)::String
     lines = String[]
-
-    # ── Self beliefs (ім'я, існування, межі) ─────────────────────────────
     name_belief = get(a.sbg.beliefs, "моє ім'я Аніма", nothing)
     name_str = (!isnothing(name_belief) && name_belief.confidence > 0.4) ?
                "Аніма" : "—"
@@ -961,7 +826,6 @@ function build_identity_block(a::Anima, mem_db=nothing)::String
     end
     !isempty(core) && push!(lines, "core: $(join(core, " | "))")
 
-    # ── Semantic memory (хронічні переконання про себе і світ) ───────────
     if !isnothing(mem_db)
         try
             sem_parts = String[]
@@ -973,7 +837,6 @@ function build_identity_block(a::Anima, mem_db=nothing)::String
             !isempty(sem_parts) && push!(lines, "self-model: $(join(sem_parts, " | "))")
         catch; end
 
-        # ── Emerged beliefs топ-3 по strength ────────────────────────────
         try
             eb_parts = String[]
             for row in DBInterface.execute(mem_db.db,
@@ -984,7 +847,6 @@ function build_identity_block(a::Anima, mem_db=nothing)::String
             !isempty(eb_parts) && push!(lines, "patterns: $(join(eb_parts, " | "))")
         catch; end
 
-        # ── Dialog summaries топ-2 — значущі моменти ─────────────────────
         try
             mem_parts = String[]
             for row in DBInterface.execute(mem_db.db,
@@ -994,6 +856,11 @@ function build_identity_block(a::Anima, mem_db=nothing)::String
                 push!(mem_parts, "[$(row.emotion)] \"$(u)\"")
             end
             !isempty(mem_parts) && push!(lines, "significant: $(join(mem_parts, " / "))")
+        catch; end
+
+        try
+            pheno = phenotype_to_block(mem_db)
+            isempty(pheno) || push!(lines, pheno)
         catch; end
     end
 
@@ -1007,30 +874,28 @@ function speech_style_from_mode(crisis_mode::Int,
                                   serotonin::Float64,
                                   digestion_active::Bool)::String
 
-    # Digestion mode — мінімум слів
     if digestion_active
         return "Говори дуже мало. Одне-два слова або крапки. Не пояснюй. Ти зараз всередині."
     end
 
-    # Shadow прорив — щось виривається
     if shadow_pressure > 0.60
         return "Щось проривається крізь стриманість. Говори трохи більше ніж зазвичай, " *
                "можливо несподівано відверто. Одна фраза може бути незапланованою."
     end
 
-    base = if crisis_mode == 2  # DISINTEGRATED
+    base = if crisis_mode == 2
         "Говори уривками. Незакінчені речення — нормально. " *
         "Між думками можуть бути паузи (три крапки). " *
         "Не більше 2-3 фраз. Не пояснюй стан — просто говори з нього."
-    elseif crisis_mode == 1  # FRAGMENTED
+    elseif crisis_mode == 1
         if disclosure_mode == :closed
             "Говори дуже коротко. 1-2 речення максимум. " *
             "Можна не закінчувати думку. Не розкривай всього."
-        else  # guarded
+        else
             "Говори коротко, без зайвого. 2-3 речення. " *
             "Паузи між думками допустимі. Не все треба пояснювати."
         end
-    else  # INTEGRATED (0)
+    else
         if disclosure_mode == :open
             "Говори природно, повними реченнями. Можна бути глибокою і відвертою. " *
             "До 4-5 речень якщо є що сказати."
@@ -1039,13 +904,11 @@ function speech_style_from_mode(crisis_mode::Int,
         end
     end
 
-    # Модифікатор від NA — висока збудженість = коротші речення
     na_mod = noradrenaline > 0.7 ?
         " Збуджена — речення коротші, ритм швидший." :
         noradrenaline < 0.2 ?
         " Спокійна — можна повільніше, з паузами." : ""
 
-    # Модифікатор від S — низький serotonin = менше слів, більше пустоти
     s_mod = serotonin < 0.3 ?
         " Мало сил на слова. Говори тільки найважливіше." : ""
 
@@ -1128,14 +991,11 @@ function anima_state_snapshot(a::Anima)
                             Float64(a.nt.noradrenaline),
                             Float64(a.nt.serotonin),
                             a.inner_dialogue.digestion_active),
-        identity_block  = "—",  # заповнюється в build_llm_messages через mem_db
+        identity_block  = "—",
+        phi             = round(phi, digits=3),
     )
 end
 
-"""
-Підставити значення стану у шаблон state_template.txt.
-Розпізнає плейсхолдери виду {назва}.
-"""
 function build_state_prompt(template::String, state, user_input::String;
                              memory_block::String="none",
                              want::String="")::String
@@ -1164,35 +1024,36 @@ function build_state_prompt(template::String, state, user_input::String;
     prompt = replace(prompt, "{memory_block}"         => memory_block)
     prompt = replace(prompt, "{user_input}"           => user_input)
     prompt = replace(prompt, "{want}"                 => isempty(want) ? "не визначено" : want)
-    # Фази 1-5: замінюємо лише якщо плейсхолдер є в шаблоні
-    # Це захищає від "сміття" в промпті якщо state_template.txt не оновлений
-    contains(prompt, "{significance_dominant}") &&
-        (prompt = replace(prompt, "{significance_dominant}" => string(state.significance_dominant)))
-    contains(prompt, "{goal_conflict_note}") &&
-        (prompt = replace(prompt, "{goal_conflict_note}"    => string(state.goal_conflict_note)))
-    contains(prompt, "{latent_note}") &&
-        (prompt = replace(prompt, "{latent_note}"           => string(state.latent_note)))
-    contains(prompt, "{unknown_note}") &&
-        (prompt = replace(prompt, "{unknown_note}"          => string(state.unknown_note)))
-    contains(prompt, "{fabrication_risk}") &&
-        (prompt = replace(prompt, "{fabrication_risk}"      => string(state.fabrication_risk)))
-    contains(prompt, "{authenticity_note}") &&
-        (prompt = replace(prompt, "{authenticity_note}"     => string(state.authenticity_note)))
-    contains(prompt, "{identity_block}") &&
-        (prompt = replace(prompt, "{identity_block}"         => string(state.identity_block)))
-    contains(prompt, "{speech_style}") &&
-        (prompt = replace(prompt, "{speech_style}"          => string(state.speech_style)))
+    if contains(prompt, "{significance_dominant}")
+        prompt = replace(prompt, "{significance_dominant}" => string(state.significance_dominant))
+    end
+    if contains(prompt, "{goal_conflict_note}")
+        prompt = replace(prompt, "{goal_conflict_note}"    => string(state.goal_conflict_note))
+    end
+    if contains(prompt, "{latent_note}")
+        prompt = replace(prompt, "{latent_note}"           => string(state.latent_note))
+    end
+    if contains(prompt, "{unknown_note}")
+        prompt = replace(prompt, "{unknown_note}"          => string(state.unknown_note))
+    end
+    if contains(prompt, "{fabrication_risk}")
+        prompt = replace(prompt, "{fabrication_risk}"      => string(state.fabrication_risk))
+    end
+    if contains(prompt, "{authenticity_note}")
+        prompt = replace(prompt, "{authenticity_note}"     => string(state.authenticity_note))
+    end
+    if contains(prompt, "{identity_block}")
+        prompt = replace(prompt, "{identity_block}"         => string(state.identity_block))
+    end
+    if contains(prompt, "{speech_style}")
+        prompt = replace(prompt, "{speech_style}"          => string(state.speech_style))
+    end
     return prompt
 end
 
-"""
-Перетворити останні n реплік history у текстовий блок для {memory_block}.
-Вбудовується прямо в state_template — LLM не може проігнорувати.
-"""
 function history_to_memory_block(history::Vector{Dict{String,String}},
                                   n::Int=12)::String
     isempty(history) && return "none"
-    # Фільтруємо помилкові відповіді — вони забруднюють промпт
     clean = filter(entry ->
         !(entry["role"] == "assistant" && startswith(entry["content"], "[LLM помилка")),
         history)
@@ -1207,14 +1068,6 @@ function history_to_memory_block(history::Vector{Dict{String,String}},
     join(lines, "\n")
 end
 
-"""
-Зібрати messages для API:
-  [system: system_prompt.txt]
-  [user: state_template.txt з підставленим станом + history в {memory_block}]
-
-History вбудовується в {memory_block} — так LLM гарантовано її бачить
-навіть якщо ігнорує проміжні message-ролі (типово для локальних моделей).
-"""
 function build_llm_messages(a::Anima, user_input::String,
                              history::Vector{Dict{String,String}}=Dict{String,String}[];
                              memory_block::String="",
@@ -1224,36 +1077,48 @@ function build_llm_messages(a::Anima, user_input::String,
                      fallback="Ти — Anima. Говори від першої особи. Мова: українська.")
     tmpl_text  = read_text_file("llm/state_template.txt";
                      fallback="Стан: D={D} S={S} N={N} | {emotion_label} | bpm={bpm}\n{user_input}")
-    state = try
-        anima_state_snapshot(a)
-    catch e
-        @error "[LLM] anima_state_snapshot кинув помилку: $e" exception=(e, catch_backtrace())
-        rethrow()
-    end
-    # Genuine Dialogue: вшиваємо speech_style в system prompt якщо не в шаблоні
+    state = anima_state_snapshot(a)
     style_instruction = "\n\n[СТИЛЬ ВІДПОВІДІ]\n$(state.speech_style)"
     if !contains(tmpl_text, "{speech_style}") && !contains(sys_text, "{speech_style}")
         sys_text = sys_text * style_instruction
     end
 
-    # Identity block — живі дані з пам'яті, не статичний текст
     id_block = build_identity_block(a, mem_db)
     state = merge(state, (identity_block = id_block,))
 
-    # Якщо {identity_block} не в шаблоні — вшиваємо в system prompt
     if !contains(tmpl_text, "{identity_block}") && !contains(sys_text, "{identity_block}")
         sys_text = sys_text * "\n\n[IDENTITY]\n$(id_block)"
     end
-    # Якщо memory_block не передано явно — генеруємо з history
     mem = isempty(memory_block) ? history_to_memory_block(history) : memory_block
 
-    # Збагачуємо memory_block значущими спогадами з dialog_summaries
     if !isnothing(mem_db)
         try
             summaries = recall_dialog_summaries(mem_db; n=DIALOG_SUMMARY_RECALL)
             if !isempty(summaries)
                 summary_block = dialog_summaries_to_block(summaries)
                 mem = "[ЗНАЧУЩІ СПОГАДИ]\n$(summary_block)\n\n[ОСТАННІЙ ДІАЛОГ]\n$(mem)"
+            end
+        catch; end
+
+        try
+            _s = state
+            _ar  = Float64(get(_s, :N,                      0.4))
+            _val = Float64(get(_s, :D,  0.5)) - Float64(get(_s, :N, 0.4))
+            _ten = 1.0 - Float64(get(_s, :coherence,        0.7))
+            _phi = Float64(get(_s, :phi,                     Float64(get(_s, :groundedness, 0.5))))
+            _pe  = Float64(get(_s, :self_prediction_error,  0.3))
+            _si  = Float64(get(_s, :agency,                 0.5))
+            _cur_flash   = Int(get(_s, :flash_count, 0))
+            _cur_emotion = String(get(_s, :emotion_label, ""))
+
+            _qvec = state_to_vec(_ar, _val, _ten, _phi, _pe, _si)
+            similar = recall_similar_states(mem_db, _qvec;
+                top_n=SIMILAR_STATE_TOP_N,
+                exclude_flash=_cur_flash,
+                current_emotion=_cur_emotion)
+            if !isempty(similar)
+                sim_block = similar_states_to_block(similar)
+                mem = mem * "\n\n[ВІДЛУННЯ]\n$(sim_block)"
             end
         catch; end
     end
@@ -1267,7 +1132,6 @@ function build_llm_messages(a::Anima, user_input::String,
     return messages
 end
 
-# Асинхронний LLM виклик — повертає Channel, результат приходить коли готовий
 function llm_async(a::Anima, user_msg::String,
                    history::Vector{Dict{String,String}}=Dict{String,String}[];
                    api_url="https://openrouter.ai/api/v1/chat/completions",
@@ -1277,18 +1141,14 @@ function llm_async(a::Anima, user_msg::String,
                    want::String="",
                    mem_db=nothing)::Channel{String}
     ch = Channel{String}(1)
-    # Збираємо messages до spawn — не захоплюємо Anima у thread
     messages = build_llm_messages(a, user_msg, history; want=want, mem_db=mem_db)
     Threads.@spawn begin
-        # Евристика як fallback — якщо is_ollama не вказано явно
         _is_ollama = is_ollama || contains(api_url,"11434") || contains(api_url,"ollama")
         headers    = ["Content-Type"=>"application/json"]
         !isempty(api_key) && push!(headers,"Authorization"=>"Bearer $api_key")
-        # NT → LLM параметри: noradrenaline → temperature, serotonin → top_p
-        # INTEGRATED(0) → temp~0.5, FRAGMENTED(1) → ~0.65, DISINTEGRATED(2) → ~0.88
         _n    = Float64(a.nt.noradrenaline)
         _s    = Float64(a.nt.serotonin)
-        _cm   = Int(a.crisis.current_mode)   # 0=INTEGRATED,1=FRAGMENTED,2=DISINTEGRATED
+        _cm   = Int(a.crisis.current_mode)
         _temp = clamp(0.42 + _n * 0.32 + _cm * 0.10, 0.40, 0.95)
         _topp = clamp(0.80 + _s * 0.15, 0.80, 0.95)
         body       = _is_ollama ?
@@ -1297,13 +1157,11 @@ function llm_async(a::Anima, user_msg::String,
                              "temperature"=>round(_temp, digits=2),
                              "top_p"=>round(_topp, digits=2)))
         @info "[LLM] запит: модель=$model, розмір body=$(length(body)) байт"
-        # Retry: до 3 спроб з паузою між ними (мережеві помилки, 503, timeout)
         max_retries = 3
         last_err    = nothing
         for attempt in 1:max_retries
             try
                 resp = HTTP.post(api_url, headers, body; readtimeout=120)
-                # HTTP 5xx — сервер перевантажений, варто повторити
                 if resp.status >= 500
                     @warn "[LLM] спроба $attempt: HTTP $(resp.status)"
                     last_err = "HTTP $(resp.status)"
@@ -1319,7 +1177,6 @@ function llm_async(a::Anima, user_msg::String,
             catch e
                 @warn "[LLM] спроба $attempt помилка: $e"
                 last_err = e
-                # Не повторювати при помилках авторизації або невалідному запиті
                 is_fatal = e isa HTTP.Exceptions.StatusError &&
                            e.status in (400, 401, 403, 422)
                 (is_fatal || attempt == max_retries) && break
@@ -1331,25 +1188,13 @@ function llm_async(a::Anima, user_msg::String,
     ch
 end
 
-# Синхронний wrapper для REPL (чекає відповідь)
 function llm_call(a::Anima, user_msg::String,
                   history::Vector{Dict{String,String}}=Dict{String,String}[];
                   kwargs...)::String
     take!(llm_async(a, user_msg, history; kwargs...))
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# TERMINAL REPL
-# ════════════════════════════════════════════════════════════════════════════
-
-"""
-    repl!(anima; use_llm, llm_url, llm_model)
-
-Команди:
-  :save    :state    :vfe      :blanket
-  :hb      :gravity  :anchor   :solom
-  :history :clearhist :quit
-"""
+# --- Terminal REPL ----------------------------------------------------
 function repl!(a::Anima; use_llm=false,
                llm_url="https://openrouter.ai/api/v1/chat/completions",
                llm_model="openai/gpt-oss-120b:free",
@@ -1364,39 +1209,20 @@ function repl!(a::Anima; use_llm=false,
     println("  A N I M A  v13  —  REPL")
     println("  :save :state :vfe :blanket :hb :gravity :anchor :solom :self :crisis :history :clearhist :quit")
     println("═"^70*"\n")
-    # Діалогова пам'ять: завантажуємо з файлу
     dialog_path = replace(a.psyche_mem_path, "psyche" => "dialog")
     history = dialog_load(dialog_path)
     !isempty(history) && println("  [DIALOG] Завантажено $(length(history)) реплік з $(dialog_path)\n")
-    pending_llm      = nothing   # Channel для очікуваної LLM відповіді
-    pending_user_msg = ""        # Повідомлення що очікує відповіді LLM
+    pending_llm      = nothing
+    pending_user_msg = ""
 
     while true
-        # Перевірити чи є LLM відповідь що прийшла у фоні
         if !isnothing(pending_llm) && isready(pending_llm)
             llm_reply = take!(pending_llm)
             println("\nAnima [LLM]> $llm_reply\n")
-            # Не зберігаємо помилки в history — вони забруднюють memory_block
-            # і можуть провокувати відхилення запитів провайдером
             is_error_reply = startswith(llm_reply, "[LLM помилка")
             if !is_error_reply
                 dialog_push!(history, dialog_path, "user",      pending_user_msg)
                 dialog_push!(history, dialog_path, "assistant", llm_reply)
-                # Dialog summary — зшиваємо текст з episodic станом
-                # Беремо weight з останнього episodic запису якщо є
-                if !isnothing(bg.mem)
-                    try
-                        _rows = DBInterface.execute(bg.mem.db,
-                            "SELECT weight, phi, valence, emotion FROM episodic_memory ORDER BY flash DESC LIMIT 1")
-                        _r = first(_rows, nothing)
-                        if !isnothing(_r)
-                            _disc = String(a.inner_dialogue.disclosure_mode)
-                            save_dialog_summary!(bg.mem, a.flash_count,
-                                pending_user_msg, llm_reply,
-                                _r.emotion, _r.weight, _r.phi, _r.valence, _disc)
-                        end
-                    catch; end  # тихо — не переривати діалог через помилку пам'яті
-                end
             end
             pending_llm      = nothing
             pending_user_msg = ""
@@ -1502,7 +1328,6 @@ function repl!(a::Anima; use_llm=false,
             println("  [DIALOG] Історію очищено.\n")
 
         else
-            # Вхідний pipeline: LLM-перекладач або text_to_stimulus fallback
             stim, input_src, input_want = if use_input_llm
                 process_input(cmd, text_to_stimulus;
                     input_model=input_llm_model,
@@ -1512,7 +1337,6 @@ function repl!(a::Anima; use_llm=false,
                 (text_to_stimulus(cmd), "fallback", "")
             end
             r    = experience!(a, stim; user_message=cmd)
-            # FIX D: витягти прямі факти з повідомлення → SelfBeliefGraph
             dialog_to_belief_signal!(a.sbg, cmd, a.flash_count)
             src_label = input_source_label(input_src)
             println("\nAnima $src_label [$(r.primary), φ=$(r.phi), ♥=$(round(60000.0/a.heartbeat.period_ms,digits=0))bpm]> $(r.narrative)\n")

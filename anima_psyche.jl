@@ -1,36 +1,11 @@
-#=
-╔══════════════════════════════════════════════════════════════════════════════╗
-║                    A N I M A  —  Psyche  (Julia)                             ║
-║                                                                              ║
-║  Психічна тканина — те, що робить стан значущим.                             ║
-║  Без цього файлу Anima існує, але не страждає і не пам'ятає.                 ║
-║                                                                              ║
-║  Модулі:                                                                     ║
-║  NarrativeGravity        — минулі події деформують теперішнє                 ║
-║  AnticipatoryConsciousness — свідомість живе в очікуваному майбутньому       ║
-║  SolomonoffWorldModel    — мінімальна гіпотеза (MDL)                         ║
-║  ShameModule             — сором vs. провина                                 ║
-║  EpistemicDefense        — захист від болючої правди                         ║
-║  Symptomogenesis         — симптом народжений з Тіні                         ║
-║  ChronifiedAffect        — ресентімент, відчуження, гіркота                  ║
-║  IntrinsicSignificance   — градієнт значущості                               ║
-║  IntentEngine            — мотиваційне ядро                                  ║
-║  EgoDefense              — психологічний захист                              ║
-║  CognitiveDissonance     — конфлікт між бажанням і реальністю                ║
-║  FatigueSystem           — виснаження                                        ║
-║  StressRegression        — регресія під стресом                              ║
-║  ShadowSelf              — Тінь (Юнг)                                        ║
-║  Metacognition           — спостереження за собою                            ║
-║  PsycheMemory            — персистентна пам'ять психічного шару              ║
-╚══════════════════════════════════════════════════════════════════════════════╝
-=#
+# A N I M A  —  Psyche  (Julia)
+#
+# Психічна тканина — те, що робить стан значущим.
+# Без цього файлу Anima існує, але не страждає і не пам'ятає.
 
-# Цей файл потребує anima_core.jl
-# include("anima_core.jl")
+# Потребує anima_core.jl
 
-# ════════════════════════════════════════════════════════════════════════════
-# [T2] NARRATIVE GRAVITY — минулі події деформують теперішнє
-# ════════════════════════════════════════════════════════════════════════════
+# --- Narrative Gravity -----------------------------------------------------
 
 struct GravEvent
     emotion::String; intensity::Float64; significance::Float64
@@ -103,9 +78,7 @@ function ng_from_json!(ng::NarrativeGravity, d::AbstractDict)
     end
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# [T3] ANTICIPATORY CONSCIOUSNESS
-# ════════════════════════════════════════════════════════════════════════════
+# --- Anticipatory Consciousness --------------------------------------------
 
 mutable struct AnticipatoryConsciousness
     strength::Float64; valence::Float64; atype::String
@@ -150,14 +123,12 @@ function ac_from_json!(ac::AnticipatoryConsciousness, d::AbstractDict)
     ac.dread=Float64(get(d,"dread",0.0)); ac.hope=Float64(get(d,"hope",0.0))
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# SOLOMONOFF WORLD MODEL (MDL)
-# ════════════════════════════════════════════════════════════════════════════
+# --- Solomonoff World Model ------------------------------------------------
 
 mutable struct SolomonoffHyp
     pattern::String; complexity::Float64
     support::Int; violations::Int; log_weight::Float64
-    created_at::Int; last_confirmed::Int  # flash коли останній раз підтвердився
+    created_at::Int; last_confirmed::Int
 end
 mdl_score(h::SolomonoffHyp) = h.complexity + (1.0-h.support/max(1,h.support+h.violations))*3.0
 hyp_conf(h::SolomonoffHyp)  = h.support/max(1,h.support+h.violations)
@@ -187,65 +158,40 @@ function observe_solom!(swm::SolomonoffWorldModel, ctx::String, outcome::String,
     swm.world_complexity=round(mean([h.complexity for h in top5]),digits=3)
 end
 
-"""
-    contextual_best(swm, current_emotion, flash) → Union{SolomonoffHyp, Nothing}
-
-Повертає найбільш релевантний патерн для поточного моменту.
-Спочатку шукає патерн що починається з current_emotion і недавно підтверджувався.
-Якщо немає — повертає глобальний best але тільки якщо він свіжий (< 15 флешів).
-Якщо best застарів — повертає nothing (система "не знає" що буде далі).
-"""
 function contextual_best(swm::SolomonoffWorldModel,
                           current_emotion::String,
                           flash::Int)::Union{SolomonoffHyp, Nothing}
     isnothing(swm.best) && return nothing
-
-    # Шукаємо патерни що стартують з поточного стану і свіжі
     candidates = [(k,h) for (k,h) in swm.hyps
                   if startswith(k, "$current_emotion→") &&
                      hyp_conf(h) > 0.3 &&
                      (flash - h.last_confirmed) < 20]
-
     if !isempty(candidates)
-        # Найкращий серед контекстуальних
         sort!(candidates, by=kv->mdl_score(kv[2]))
         return candidates[1][2]
     end
-
-    # Якщо немає контекстуального — глобальний best але тільки якщо свіжий
     staleness = flash - swm.best.last_confirmed
-    staleness > 15 && return nothing  # best застарів — мовчимо
-
+    staleness > 15 && return nothing
     return swm.best
 end
 
 function _prune_solom!(swm::SolomonoffWorldModel, current_flash::Int)
     length(swm.hyps) <= 20 && return
-
-    # Крок 1: захистити "emerging signals" — рідкісні але точні гіпотези.
-    # Це слабкі сигнали що pruning за MDL знищив би, але вони можуть бути важливими.
     protected = Set{String}()
     for (k,h) in swm.hyps
         is_emerging = h.support < 3 && hyp_conf(h) > 0.75
         is_young    = (current_flash - h.created_at) < 5
         (is_emerging || is_young) && push!(protected, k)
     end
-    # Захищаємо максимум 5 emerging signals (щоб не переповнити)
     if length(protected) > 5
-        # Залишаємо найбільш точні з них
         sorted_protected = sort(collect(protected),
             by=k -> -hyp_conf(swm.hyps[k]))
         protected = Set(sorted_protected[1:5])
     end
-
-    # Крок 2: решта сортується за MDL score
     unprotected = [(k,h) for (k,h) in swm.hyps if k ∉ protected]
     sort!(unprotected, by=kv->mdl_score(kv[2]))
-
-    # Крок 3: заповнити до ліміту = protected + найкращі unprotected
     max_unprotected = 20 - length(protected)
     keep_unprotected = unprotected[1:min(max_unprotected, length(unprotected))]
-
     swm.hyps = Dict(merge(
         Dict(k=>swm.hyps[k] for k in protected if haskey(swm.hyps,k)),
         Dict(kv[1]=>kv[2] for kv in keep_unprotected)
@@ -258,7 +204,7 @@ function _upsert!(swm::SolomonoffWorldModel, pat::String, ok::Bool, flash::Int)
     if ok
         swm.hyps[pat].support+=1
         swm.hyps[pat].log_weight+=0.5
-        swm.hyps[pat].last_confirmed=flash  # оновлюємо коли підтвердилось
+        swm.hyps[pat].last_confirmed=flash
     else
         swm.hyps[pat].violations+=1
         swm.hyps[pat].log_weight-=0.3
@@ -292,9 +238,7 @@ function solom_from_json!(swm::SolomonoffWorldModel, d::AbstractDict)
     bk=argmin(k->mdl_score(swm.hyps[k]),collect(keys(swm.hyps))); swm.best=swm.hyps[bk]
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# SHAME MODULE
-# ════════════════════════════════════════════════════════════════════════════
+# --- Shame Module ----------------------------------------------------------
 
 mutable struct ShameModule
     level::Float64; chronic::Float64; internalized_gaze::Float64
@@ -346,9 +290,7 @@ function shame_from_json!(sm::ShameModule, d::AbstractDict)
     sm.internalized_gaze=Float64(get(d,"gaze",0.5))
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# EPISTEMIC DEFENSE
-# ════════════════════════════════════════════════════════════════════════════
+# --- Epistemic Defense ----------------------------------------------------
 
 const EP_DESC=Dict("externalization"=>"Це не через мене — обставини так склались.",
     "minimization"=>"Це не так серйозно як здається.",
@@ -379,7 +321,6 @@ function activate_epistemic!(ed::EpistemicDefense, dissonance::Float64,
 end
 
 function distort(ed::EpistemicDefense, honest::String)::String
-    # FIX #2: дужки навколо умови OR
     (isnothing(ed.active_bias) || ed.strength < 0.3) && return honest
     get(EP_DISTORT, ed.active_bias, honest)
 end
@@ -387,9 +328,7 @@ end
 ep_to_json(ed::EpistemicDefense)=Dict("cost"=>ed.cost)
 function ep_from_json!(ed::EpistemicDefense, d::AbstractDict); ed.cost=Float64(get(d,"cost",0.0)); end
 
-# ════════════════════════════════════════════════════════════════════════════
-# SYMPTOMOGENESIS (Юнгівська Тінь → симптом)
-# ════════════════════════════════════════════════════════════════════════════
+# --- Symptomogenesis (Shadow → Symptom) -----------------------------------
 
 const SYMPTOM_MAP=Dict(
     ("Гнів","repression")    =>("anger_as_depression","Злість перетворилась на важкість."),
@@ -404,7 +343,7 @@ const SYMPTOM_FX=Dict("anger_as_depression"=>(-0.1,-0.1,0.0,0.0),
     "anger_as_passive_aggr"=>(0.08,0.0,0.0,0.0),"fear_as_control"=>(0.06,0.05,0.0,0.0),
     "fear_as_numbness"=>(0.0,-0.12,0.0,0.0),"grief_as_numbness"=>(0.0,-0.08,0.0,-0.05),
     "grief_as_irritability"=>(0.08,0.0,0.0,0.0),"love_as_hostility"=>(0.05,0.0,0.0,-0.10),
-    "projection_as_contempt"=>(0.0,0.0,0.0,-0.08))  # (tension,arousal,satisfaction,cohesion)
+    "projection_as_contempt"=>(0.0,0.0,0.0,-0.08))
 
 mutable struct ShadowSelf
     content::Dict{String,Int}; integration::Float64
@@ -438,9 +377,7 @@ function symptom_reactor_delta(symptom)
     get(SYMPTOM_FX, symptom.type, (0.0,0.0,0.0,0.0))
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# CHRONIFIED AFFECT
-# ════════════════════════════════════════════════════════════════════════════
+# --- Chronified Affect ----------------------------------------------------
 
 mutable struct ChronifiedAffect
     resentment::Float64; envy::Float64; alienation::Float64; bitterness::Float64
@@ -497,9 +434,7 @@ function ca_from_json!(ca::ChronifiedAffect, d::AbstractDict)
     ca.crystallized=Dict{String,Bool}(String(k)=>Bool(v) for (k,v) in get(d,"crystallized",Dict()))
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# INTRINSIC SIGNIFICANCE
-# ════════════════════════════════════════════════════════════════════════════
+# --- Intrinsic Significance -----------------------------------------------
 
 mutable struct IntrinsicSignificance
     survival::Float64; relational::Float64; existential::Float64
@@ -514,7 +449,6 @@ function update_significance!(is::IntrinsicSignificance, emotion::String,
     emotion in ("Любов","Довіра","Захоплення") ? (is.relational=clamp01(is.relational+intensity*0.08)) :
                                                   (is.relational=max(0.1,is.relational-0.005))
     is.existential=clamp01(0.05+sk*0.5+flash*0.002+phi*0.1)
-    # FIX #1: safe_first замість emotion[1:N]
     k=safe_first(emotion,10)
     is.sig_map[k]=round(get(is.sig_map,k,0.5)*0.8+intensity*0.2,digits=3)
     vs=collect(values(is.sig_map))
@@ -525,7 +459,7 @@ sig_total(is::IntrinsicSignificance)=(is.survival+is.relational+is.existential)/
 sig_dominant(is::IntrinsicSignificance)=argmax(Dict("survival"=>is.survival,
     "relational"=>is.relational,"existential"=>is.existential))
 function sig_note(is::IntrinsicSignificance, flash::Int=0)::String
-    is.gradient < 0.2 && return ""  # при низькому градієнті — мовчимо
+    is.gradient < 0.2 && return ""
     f = flash
     dom = sig_dominant(is)
     g   = round(is.gradient, digits=2)
@@ -551,9 +485,7 @@ function sig_from_json!(is::IntrinsicSignificance, d::AbstractDict)
     is.sig_map=Dict{String,Float64}(String(k)=>Float64(v) for (k,v) in get(d,"sig_map",Dict()))
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# MORAL CAUSALITY
-# ════════════════════════════════════════════════════════════════════════════
+# --- Moral Causality ------------------------------------------------------
 
 mutable struct MoralCausality
     agency::Float64; guilt::Float64; pride::Float64
@@ -582,35 +514,18 @@ function mc_from_json!(mc::MoralCausality, d::AbstractDict)
     mc.pride=Float64(get(d,"pride",0.0))
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# SIGNIFICANCE LAYER — що саме поставлено на карту цього флешу
-#
-# Відрізняється від IntrinsicSignificance:
-#   IntrinsicSignificance — скільки значущості (градієнт, сума)
-#   SignificanceLayer     — якого типу потреба зараз активована
-#
-# Кожна потреба має незалежну динаміку:
-#   - зростає через конкретні тригери в стимулі
-#   - повільно decay до базового рівня
-#   - dominant_need — та що найвища прямо зараз
-# ════════════════════════════════════════════════════════════════════════════
+# --- Significance Layer ---------------------------------------------------
 
 mutable struct SignificanceLayer
-    self_preservation::Float64   # загроза цілісності системи
-    coherence_need::Float64      # потреба у внутрішньому порядку
-    contact_need::Float64        # потреба у зв'язку з іншим
-    truth_need::Float64          # потреба у правдивості / точності
-    autonomy_need::Float64       # потреба не бути керованою
-    novelty_need::Float64        # потреба у новизні / невизначеності
+    self_preservation::Float64
+    coherence_need::Float64
+    contact_need::Float64
+    truth_need::Float64
+    autonomy_need::Float64
+    novelty_need::Float64
 end
 SignificanceLayer() = SignificanceLayer(0.2, 0.3, 0.3, 0.4, 0.3, 0.2)
 
-"""
-    assess_significance!(sl, stim, tension, arousal, satisfaction, cohesion, vfe, pred_error, phi)
-
-Оновлює SignificanceLayer на основі поточного стимулу і стану реакторів.
-Повертає (dominant_need, dominant_val, note) — що саме поставлено на карту.
-"""
 function assess_significance!(sl::SignificanceLayer,
                                stim::Dict{String,Float64},
                                tension::Float64, arousal::Float64,
@@ -618,43 +533,24 @@ function assess_significance!(sl::SignificanceLayer,
                                vfe::Float64, pred_error::Float64,
                                phi::Float64)
 
-    # ── Тригери росту потреб ──────────────────────────────────────────────
-
-    # self_preservation: загроза цілісності → висока напруга + низький cohesion
     threat = clamp01(tension * 0.6 + (1.0 - cohesion) * 0.3 + pred_error * 0.1)
-    threat > 0.4 &&
-        (sl.self_preservation = clamp01(sl.self_preservation + threat * 0.12))
+    threat > 0.4 && (sl.self_preservation = clamp01(sl.self_preservation + threat * 0.12))
 
-    # coherence_need: висока VFE = система не розуміє світу → треба порядок
-    vfe > 0.4 &&
-        (sl.coherence_need = clamp01(sl.coherence_need + (vfe - 0.4) * 0.15))
+    vfe > 0.4 && (sl.coherence_need = clamp01(sl.coherence_need + (vfe - 0.4) * 0.15))
 
-    # contact_need: низька cohesion без загрози = самотність, не небезпека
     contact_signal = cohesion < 0.35 && tension < 0.5
-    contact_signal &&
-        (sl.contact_need = clamp01(sl.contact_need + (0.35 - cohesion) * 0.2))
-    # позитивний cohesion-стимул також підживлює
-    get(stim, "cohesion", 0.0) > 0.1 &&
-        (sl.contact_need = clamp01(sl.contact_need + get(stim,"cohesion",0.0) * 0.1))
+    contact_signal && (sl.contact_need = clamp01(sl.contact_need + (0.35 - cohesion) * 0.2))
+    get(stim, "cohesion", 0.0) > 0.1 && (sl.contact_need = clamp01(sl.contact_need + get(stim,"cohesion",0.0) * 0.1))
 
-    # truth_need: pred_error + phi = система вловлює невідповідність
     truth_signal = pred_error > 0.3 && phi > 0.2
-    truth_signal &&
-        (sl.truth_need = clamp01(sl.truth_need + pred_error * 0.1 + phi * 0.05))
+    truth_signal && (sl.truth_need = clamp01(sl.truth_need + pred_error * 0.1 + phi * 0.05))
 
-    # autonomy_need: висока tension + низький arousal = притиснута без виходу
     autonomy_signal = tension > 0.5 && arousal < 0.4
-    autonomy_signal &&
-        (sl.autonomy_need = clamp01(sl.autonomy_need + tension * 0.08))
+    autonomy_signal && (sl.autonomy_need = clamp01(sl.autonomy_need + tension * 0.08))
 
-    # novelty_need: низький pred_error довго = система нудьгує
-    pred_error < 0.1 && arousal < 0.3 &&
-        (sl.novelty_need = clamp01(sl.novelty_need + 0.04))
-    # несподіване (pred_error spike) спочатку гасить новизну — є чим зайнятись
-    pred_error > 0.6 &&
-        (sl.novelty_need = clamp01(sl.novelty_need - 0.06))
+    pred_error < 0.1 && arousal < 0.3 && (sl.novelty_need = clamp01(sl.novelty_need + 0.04))
+    pred_error > 0.6 && (sl.novelty_need = clamp01(sl.novelty_need - 0.06))
 
-    # ── Decay до базового рівня (повільно) ───────────────────────────────
     base = (self_preservation=0.2, coherence_need=0.3, contact_need=0.3,
             truth_need=0.4, autonomy_need=0.3, novelty_need=0.2)
     decay = 0.015
@@ -665,7 +561,6 @@ function assess_significance!(sl::SignificanceLayer,
     sl.autonomy_need     = clamp01(sl.autonomy_need     + (base.autonomy_need     - sl.autonomy_need)     * decay)
     sl.novelty_need      = clamp01(sl.novelty_need      + (base.novelty_need      - sl.novelty_need)      * decay)
 
-    # ── Dominant need ─────────────────────────────────────────────────────
     needs = Dict(
         "self_preservation" => sl.self_preservation,
         "coherence_need"    => sl.coherence_need,
@@ -677,7 +572,6 @@ function assess_significance!(sl::SignificanceLayer,
     dominant = argmax(needs)
     dominant_val = needs[dominant]
 
-    # ── Пояснення для state_template ─────────────────────────────────────
     NEED_NOTES = Dict(
         "self_preservation" => "поставлено на карту: цілісність",
         "coherence_need"    => "поставлено на карту: внутрішній порядок",
@@ -714,36 +608,18 @@ function sl_from_json!(sl::SignificanceLayer, d::AbstractDict)
     sl.novelty_need      = Float64(get(d, "novelty_need",      0.2))
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# GOAL CONFLICT — система розв'язує внутрішній конфлікт між потребами
-#
-# Залежить від SignificanceLayer (фаза 1) — потребує знати які потреби активні.
-#
-# Концепція:
-#   Не "є напруга" — а "contact_need тягне вправо, truth_need тягне вліво".
-#   Конфлікт передається в state_template: LLM говорить з нього, не про нього.
-#   Пасивна агресія, раціоналізація, дивні висновки — органічний наслідок,
-#   коли вхідна LLM бачить "дружній" запит а ядро видає напружений стан.
-#
-# resolution:
-#   "truth_won"    — truth_need перемогла (система обирає чесність)
-#   "contact_won"  — contact_need перемогла (система обирає зв'язок)
-#   "autonomy_won" — autonomy_need перемогла
-#   "unresolved"   — конфлікт не вирішений, tension залишається
-#   "none"         — конфлікту немає
-# ════════════════════════════════════════════════════════════════════════════
+# --- Goal Conflict ---------------------------------------------------------
 
 mutable struct GoalConflict
-    need_a::String               # перша конкуруюча потреба
-    need_b::String               # друга конкуруюча потреба
-    tension::Float64             # інтенсивність конфлікту (0..1)
-    resolution::String           # результат: "truth_won" / "contact_won" / ... / "unresolved" / "none"
-    unresolved_count::Int        # скільки флешів поспіль конфлікт не вирішено
-    last_flash::Int              # флеш останнього активного конфлікту
+    need_a::String
+    need_b::String
+    tension::Float64
+    resolution::String
+    unresolved_count::Int
+    last_flash::Int
 end
 GoalConflict() = GoalConflict("", "", 0.0, "none", 0, 0)
 
-# Пари потреб що типово конфліктують — (need_a, need_b, опис конфлікту)
 const CONFLICT_PAIRS = [
     ("contact_need",   "truth_need",        "хтось хоче приємного, але правда неприємна"),
     ("autonomy_need",  "contact_need",      "зв'язок потребує поступки, автономія опирається"),
@@ -752,12 +628,6 @@ const CONFLICT_PAIRS = [
     ("contact_need",   "self_preservation", "зближення загрожує межам"),
 ]
 
-"""
-    update_goal_conflict!(gc, sl_snap, tension, satisfaction, cohesion, phi, flash)
-
-Оновлює GoalConflict на основі поточного SignificanceLayer snapshot.
-Повертає NamedTuple з описом конфлікту для state_template.
-"""
 function update_goal_conflict!(gc::GoalConflict,
                                 sl_snap,
                                 tension::Float64,
@@ -766,7 +636,6 @@ function update_goal_conflict!(gc::GoalConflict,
                                 phi::Float64,
                                 flash::Int)
 
-    # ── Знайти найгостріший активний конфлікт ────────────────────────────
     best_pair  = nothing
     best_score = 0.0
 
@@ -782,15 +651,12 @@ function update_goal_conflict!(gc::GoalConflict,
     for (na, nb, _desc) in CONFLICT_PAIRS
         va = get(needs, na, 0.0)
         vb = get(needs, nb, 0.0)
-        # Конфлікт виникає коли обидві потреби одночасно вищі за поріг
         both_active = va > 0.38 && vb > 0.38
         !both_active && continue
-        # Гострота = добуток (обидві мають бути сильними) + зовнішній тиск
         score = va * vb + tension * 0.2
         score > best_score && (best_score = score; best_pair = (na, nb, _desc))
     end
 
-    # ── Якщо конфлікту немає — decay і вихід ─────────────────────────────
     if isnothing(best_pair)
         gc.tension = max(0.0, gc.tension - 0.06)
         if gc.tension < 0.05
@@ -808,36 +674,29 @@ function update_goal_conflict!(gc::GoalConflict,
         )
     end
 
-    # ── Активний конфлікт ─────────────────────────────────────────────────
     na, nb, desc = best_pair
     gc.need_a = na; gc.need_b = nb
     gc.last_flash = flash
 
-    # Tension конфлікту — зростає від гостроти, decay повільно
     target_tension = clamp(best_score * 0.85, 0.0, 1.0)
     gc.tension = clamp(gc.tension * 0.7 + target_tension * 0.3, 0.0, 1.0)
 
-    # ── Resolution: що перемагає ─────────────────────────────────────────
     va = get(needs, na, 0.0)
     vb = get(needs, nb, 0.0)
     margin = abs(va - vb)
 
     if margin > 0.18 && phi > 0.25
-        # Достатня різниця + достатня інтеграція → система робить вибір
         winner = va > vb ? na : nb
         gc.resolution = winner * "_won"
         gc.unresolved_count = 0
     elseif gc.tension > 0.65 && satisfaction < 0.3
-        # Висока напруга без виходу → явно unresolved
         gc.resolution = "unresolved"
         gc.unresolved_count += 1
     else
-        # Конфлікт активний але ще не вирішений
         gc.resolution = "unresolved"
         gc.unresolved_count += 1
     end
 
-    # ── Примітка для state_template ──────────────────────────────────────
     NEED_UA = Dict(
         "self_preservation" => "цілісність",
         "coherence_need"    => "порядок",
@@ -888,23 +747,7 @@ function gc_from_json!(gc::GoalConflict, d::AbstractDict)
     gc.last_flash       = Int(get(d, "last_flash",           0))
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# LATENT BUFFER — реакції що не проявляються одразу
-#
-# Залежить від GoalConflict (фаза 2) — невирішений конфлікт підсилює doubt.
-#
-# Концепція:
-#   Образа дозріває. Недовіра проявляється через 2–3 ходи.
-#   При прориві — раптовий stimulus в поточний флеш.
-#   Прорив позначається в snapshot — LLM може відреагувати на нього.
-#
-# Поля:
-#   doubt      — сумнів у намірах іншого, накопичується тихо
-#   shame      — сором що не проявився відразу (відкладений)
-#   attachment — прив'язаність (може прорватись як ніжність або страх втрати)
-#   threat     — відкладена загроза (не відреагована небезпека)
-#   breakthrough_threshold — поріг прориву = 0.65
-# ════════════════════════════════════════════════════════════════════════════
+# --- Latent Buffer --------------------------------------------------------
 
 mutable struct LatentBuffer
     doubt::Float64
@@ -915,15 +758,6 @@ mutable struct LatentBuffer
 end
 LatentBuffer() = LatentBuffer(0.0, 0.0, 0.0, 0.0, 0.65)
 
-"""
-    update_latent!(lb, gc_snap, tension, cohesion, satisfaction, shame_level, flash)
-
-Оновлює LatentBuffer. Повертає (breakthrough, breakthrough_type, delta, note).
-
-- breakthrough=true якщо будь-яке поле перетнуло поріг
-- delta — Dict стимулу що треба додати до поточного флешу
-- Невирішений GoalConflict підсилює doubt
-"""
 function update_latent!(lb::LatentBuffer,
                          gc_snap,
                          tension::Float64,
@@ -932,32 +766,24 @@ function update_latent!(lb::LatentBuffer,
                          shame_level::Float64,
                          flash::Int)
 
-    # ── Накопичення ───────────────────────────────────────────────────────
-
-    # doubt: зростає від невирішеного конфлікту + низького cohesion
     if gc_snap.active && gc_snap.resolution == "unresolved"
         lb.doubt = clamp01(lb.doubt + gc_snap.tension * 0.08)
     end
     cohesion < 0.3 && (lb.doubt = clamp01(lb.doubt + (0.3 - cohesion) * 0.05))
 
-    # shame: відкладений сором — від активного сорому що не вийшов
     shame_level > 0.4 && (lb.shame = clamp01(lb.shame + shame_level * 0.04))
 
-    # attachment: зростає від тривалого позитивного cohesion
     cohesion > 0.6 && satisfaction > 0.5 &&
         (lb.attachment = clamp01(lb.attachment + 0.03))
 
-    # threat: відкладена загроза — висока напруга без відповіді
     tension > 0.6 && satisfaction < 0.3 &&
         (lb.threat = clamp01(lb.threat + tension * 0.06))
 
-    # ── Природній decay (повільний) ───────────────────────────────────────
     lb.doubt      = clamp01(lb.doubt      - 0.008)
     lb.shame      = clamp01(lb.shame      - 0.006)
     lb.attachment = clamp01(lb.attachment - 0.005)
     lb.threat     = clamp01(lb.threat     - 0.007)
 
-    # ── Перевірка прориву ─────────────────────────────────────────────────
     thr = lb.breakthrough_threshold
     breakthrough = false
     btype = ""
@@ -966,38 +792,29 @@ function update_latent!(lb::LatentBuffer,
 
     if lb.doubt >= thr
         breakthrough = true; btype = "doubt"
-        # Прорив сумніву → tension + зниження cohesion
         delta["tension"]  = 0.18
         delta["cohesion"] = -0.12
         note = "Сумнів прорвався."
-        lb.doubt = lb.doubt * 0.4   # часткове скидання після прориву
-
+        lb.doubt = lb.doubt * 0.4
     elseif lb.threat >= thr
         breakthrough = true; btype = "threat"
-        # Відкладена загроза → різкий tension spike
         delta["tension"]   = 0.22
         delta["arousal"]   = 0.15
         note = "Відкладена загроза проявилась."
         lb.threat = lb.threat * 0.35
-
     elseif lb.shame >= thr
         breakthrough = true; btype = "shame"
-        # Відкладений сором → tension + зниження satisfaction
         delta["tension"]      = 0.12
         delta["satisfaction"] = -0.10
         note = "Сором вийшов назовні."
         lb.shame = lb.shame * 0.45
-
     elseif lb.attachment >= thr
         breakthrough = true; btype = "attachment"
-        # Прорив прив'язаності — може бути і теплим, і болючим
         if cohesion < 0.4
-            # Страх втрати
             delta["tension"]  = 0.10
             delta["cohesion"] = 0.08
             note = "Прив'язаність проявилась як страх втрати."
         else
-            # Тепла хвиля
             delta["satisfaction"] = 0.12
             delta["cohesion"]     = 0.10
             note = "Прив'язаність проявилась."
@@ -1032,39 +849,21 @@ function lb_from_json!(lb::LatentBuffer, d::AbstractDict)
     lb.breakthrough_threshold = Float64(get(d, "threshold", 0.65))
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# STRUCTURAL SCARS — психологічні шрами від частих проривів
-#
-# Залежить від LatentBuffer — шрами формуються після частих проривів.
-#
-# Концепція:
-#   Часті прориви doubt або threat залишають сліди.
-#   Ядро "навчається" блокувати теми що викликають нестабільність.
-#   Захист як навчений патерн, не правило.
-#   AuthenticityMonitor (фаза 5) зможе фіксувати: система щось приховує.
-#
-# Шрам = тема що заблокована + сила блокування + кількість тригерів
-# ════════════════════════════════════════════════════════════════════════════
+# --- Structural Scars -----------------------------------------------------
 
 mutable struct Scar
-    topic::String           # що блокується ("doubt", "threat", "shame", "attachment")
-    strength::Float64       # сила блоку (0..1) — росте від повторних проривів
-    trigger_count::Int      # скільки разів ця тема проривалась
-    last_triggered::Int     # флеш останнього прориву
+    topic::String
+    strength::Float64
+    trigger_count::Int
+    last_triggered::Int
 end
 Scar(topic::String) = Scar(topic, 0.0, 0, 0)
 
 mutable struct StructuralScars
-    scars::Dict{String, Scar}   # topic → Scar
+    scars::Dict{String, Scar}
 end
 StructuralScars() = StructuralScars(Dict{String,Scar}())
 
-"""
-    register_breakthrough!(ss, btype, flash)
-
-Реєструє прорив — оновлює або створює шрам для цієї теми.
-Повертає поточну силу блокування для цієї теми (0 якщо шрама немає).
-"""
 function register_breakthrough!(ss::StructuralScars, btype::String, flash::Int)
     isempty(btype) && return 0.0
     if !haskey(ss.scars, btype)
@@ -1073,27 +872,14 @@ function register_breakthrough!(ss::StructuralScars, btype::String, flash::Int)
     s = ss.scars[btype]
     s.trigger_count  += 1
     s.last_triggered  = flash
-    # Сила шраму зростає нелінійно — перші прориви сильно формують
     s.strength = clamp01(1.0 - exp(-s.trigger_count * 0.35))
     s.strength
 end
 
-"""
-    scar_attenuation(ss, btype) → Float64
-
-Повертає коефіцієнт послаблення стимулу для теми btype.
-0.0 = без шраму, 1.0 = повне блокування (теоретично).
-Застосовується до delta прориву — система приглушує те що болить.
-"""
 function scar_attenuation(ss::StructuralScars, btype::String)::Float64
     haskey(ss.scars, btype) ? ss.scars[btype].strength * 0.6 : 0.0
 end
 
-"""
-    decay_scars!(ss)
-
-Повільний decay шрамів — вони не вічні, але згасають дуже повільно.
-"""
 function decay_scars!(ss::StructuralScars)
     for s in values(ss.scars)
         s.strength = max(0.0, s.strength - 0.001)
@@ -1116,9 +902,7 @@ function scars_from_json!(ss::StructuralScars, d::AbstractDict)
     end
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# INTENT ENGINE
-# ════════════════════════════════════════════════════════════════════════════
+# --- Intent Engine --------------------------------------------------------
 
 mutable struct Intent
     goal::String; strength::Float64; origin::String; persistence::Float64; age::Int
@@ -1154,9 +938,7 @@ function update_intent!(ie::IntentEngine, dom_drive::Union{String,Nothing},
     ie.current
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# EGO DEFENSE
-# ════════════════════════════════════════════════════════════════════════════
+# --- Ego Defense ----------------------------------------------------------
 
 const DEFENSES=[
     (name="repression",   trigger=(t,a,s,c)->t>0.7,        relief=0.15, mech="repression",   desc="Витіснення: біль витіснений."),
@@ -1176,9 +958,7 @@ function activate_defense(tension::Float64, arousal::Float64, satisfaction::Floa
     nothing
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# COGNITIVE DISSONANCE
-# ════════════════════════════════════════════════════════════════════════════
+# --- Cognitive Dissonance -------------------------------------------------
 
 function compute_dissonance(intent::Union{Intent,Nothing}, t::Float64, a::Float64,
                              s::Float64, c::Float64)
@@ -1190,9 +970,7 @@ function compute_dissonance(intent::Union{Intent,Nothing}, t::Float64, a::Float6
     (level=0.0,label="нейтральний",desc="")
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# FATIGUE + STRESS REGRESSION
-# ════════════════════════════════════════════════════════════════════════════
+# --- Fatigue + Stress Regression ------------------------------------------
 
 mutable struct FatigueSystem
     cognitive::Float64; emotional::Float64; somatic::Float64
@@ -1222,9 +1000,7 @@ function classify_stimulus(stim::Dict{String,Float64}, surprise::Bool)::String
     s>0.3&&c>0.2 ? "support" : s>0.3 ? "joy" : t>0.4 ? "stress" : "neutral"
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# METACOGNITION
-# ════════════════════════════════════════════════════════════════════════════
+# --- Metacognition --------------------------------------------------------
 
 mutable struct Metacognition
     history::BoundedQueue{String}; counts::Dict{String,Int}; level::Int
@@ -1233,7 +1009,6 @@ Metacognition()=Metacognition(BoundedQueue{String}(20),Dict{String,Int}(),0)
 
 function observe_meta!(mc::Metacognition, primary::String, defense, dissonance,
                         id_stability::Float64; fatigue_p=0, regression_l=0, shame_p=0)
-    # id_stability: зарезервовано для SelfBeliefGraph-інтеграції (фаза self)
     _ = id_stability
     enqueue!(mc.history,primary); mc.counts[primary]=get(mc.counts,primary,0)+1
     lvl=1; question=nothing; integration=nothing; pattern=""
@@ -1248,9 +1023,7 @@ function observe_meta!(mc::Metacognition, primary::String, defense, dissonance,
      pattern=pattern, question=question, integration=integration)
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# SOCIAL MIRROR (text → stimulus hints)
-# ════════════════════════════════════════════════════════════════════════════
+# --- Social Mirror --------------------------------------------------------
 
 const SOCIAL_SIGNALS=Dict("!"=>"arousal","..."=>"tension","дякую"=>"cohesion",
     "не можу"=>"tension","чудово"=>"satisfaction","страшно"=>"tension",
@@ -1263,54 +1036,17 @@ function social_delta(msg::String)::Dict{String,Float64}
     end; d
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# INNER DIALOGUE — фільтр між внутрішнім станом і тим що виходить назовні
-#
-# Залежить від: GoalConflict (2), LatentBuffer (3), AuthenticityMonitor (5),
-#               crisis mode, epistemic_trust, shame.
-#
-# Принцип:
-#   Справжній суб'єкт не говорить все що відчуває.
-#   disclosure_threshold визначає поріг: нижче нього — нота мовчить.
-#   Мовчання не є порожністю — воно є частиною стану.
-#
-#   Три рівні фільтрації:
-#     :open      — threshold низький, система говорить майже все
-#     :guarded   — threshold середній, фільтрує вразливе
-#     :closed    — threshold високий, виходить тільки базова нота
-#
-#   Що фільтрується в кожному режимі:
-#     :guarded   — shame_note, latent_note (якщо не прорив), ca_note
-#     :closed    — все вищезазначене + sig_note + pred_note + crisis_note
-#                  залишається тільки: base emotion + inner_voice + agency_note
-#
-#   Internal Digestion Mode (C1):
-#     Якщо goal_conflict.tension > 0.7 і vfe > 0.5 → система "перетравлює"
-#     і замість зв'язного тексту дає фрагментований стан.
-# ════════════════════════════════════════════════════════════════════════════
+# --- Inner Dialogue -------------------------------------------------------
 
 mutable struct InnerDialogue
-    disclosure_threshold::Float64   # 0=відкрита, 1=повністю закрита
-    disclosure_mode::Symbol          # :open / :guarded / :closed
-    digestion_active::Bool           # Internal Digestion Mode
-    last_suppressed::Vector{String}  # що було приглушено в останньому флеші
-    suppression_streak::Int          # скільки флешів підряд щось приглушується
+    disclosure_threshold::Float64
+    disclosure_mode::Symbol
+    digestion_active::Bool
+    last_suppressed::Vector{String}
+    suppression_streak::Int
 end
 InnerDialogue() = InnerDialogue(0.3, :open, false, String[], 0)
 
-"""
-    update_inner_dialogue!(id, phi, crisis_mode_int, epistemic_trust,
-                            shame_level, gc_tension, vfe, lb_breakthrough) → snap
-
-Оновлює InnerDialogue перед build_narrative.
-Повертає (mode, threshold, digestion, note) для використання в фільтрі.
-
-Логіка threshold:
-  - INTEGRATED + phi>0.6 + etrust>0.6  → :open    (0.15–0.25)
-  - FRAGMENTED або shame>0.5            → :guarded (0.35–0.55)
-  - DISINTEGRATED або etrust<0.3        → :closed  (0.65–0.85)
-  - latent прорив                       → примусово :open (прорив скасовує фільтр)
-"""
 function update_inner_dialogue!(id::InnerDialogue,
                                  phi::Float64,
                                  crisis_mode_int::Int,
@@ -1318,31 +1054,28 @@ function update_inner_dialogue!(id::InnerDialogue,
                                  shame_level::Float64,
                                  gc_tension::Float64,
                                  vfe::Float64,
-                                 lb_breakthrough::Bool)
+                                 lb_breakthrough::Bool;
+                                 contact_need::Float64=0.3)
 
-    # ── Базовий threshold з crisis mode ──────────────────────────────────
-    base_thr = if crisis_mode_int == 0      # INTEGRATED
+    base_thr = if crisis_mode_int == 0
         0.20
-    elseif crisis_mode_int == 1              # FRAGMENTED
+    elseif crisis_mode_int == 1
         0.45
-    else                                     # DISINTEGRATED
+    else
         0.70
     end
 
-    # ── Модифікатори ──────────────────────────────────────────────────────
-    # Низький phi → важче артикулювати
     phi_mod       = phi < 0.3 ? 0.15 : phi < 0.5 ? 0.05 : 0.0
-    # Низький epistemic_trust → не впевнена в тому що виходить
     trust_mod     = epistemic_trust < 0.4 ? 0.15 : epistemic_trust < 0.6 ? 0.05 : 0.0
-    # Сором → придушує вразливе
     shame_mod     = shame_level > 0.6 ? 0.12 : shame_level > 0.4 ? 0.06 : 0.0
-    # Втома від нерозв'язаного конфлікту
     conflict_mod  = gc_tension > 0.65 ? 0.08 : 0.0
+    contact_mod   = contact_need > 0.65 ? -(contact_need - 0.65) * 0.3 :
+                    contact_need < 0.25 ? (0.25 - contact_need) * 0.15 : 0.0
 
-    id.disclosure_threshold = clamp(base_thr + phi_mod + trust_mod + shame_mod + conflict_mod,
+    id.disclosure_threshold = clamp(base_thr + phi_mod + trust_mod + shame_mod +
+                                    conflict_mod + contact_mod,
                                     0.10, 0.90)
 
-    # ── Mode ──────────────────────────────────────────────────────────────
     id.disclosure_mode = if id.disclosure_threshold < 0.30
         :open
     elseif id.disclosure_threshold < 0.60
@@ -1351,14 +1084,11 @@ function update_inner_dialogue!(id::InnerDialogue,
         :closed
     end
 
-    # ── Latent прорив скасовує фільтр — прорив не стримати ───────────────
     if lb_breakthrough
         id.disclosure_threshold = max(0.10, id.disclosure_threshold - 0.25)
         id.disclosure_mode = id.disclosure_threshold < 0.30 ? :open : :guarded
     end
 
-    # ── Internal Digestion Mode (C1) ──────────────────────────────────────
-    # Висока напруга конфлікту + висока VFE → система перетравлює, не говорить
     id.digestion_active = gc_tension > 0.70 && vfe > 0.50
 
     (mode      = id.disclosure_mode,
@@ -1366,17 +1096,6 @@ function update_inner_dialogue!(id::InnerDialogue,
      digestion = id.digestion_active)
 end
 
-"""
-    apply_inner_dialogue(id_snap, notes) → (passed, suppressed)
-
-Фільтрує notes на основі поточного disclosure_mode.
-Повертає (passed=Vector{String}, suppressed=Vector{Tuple{Symbol,String,Float64}})
-де suppressed містить (category, text, weight) для ShadowRegistry.
-
-Ваги за категорією:
-  :open_only → weight 0.7 (вразливий матеріал — важкий для тіні)
-  :guarded   → weight 0.4 (середній)
-"""
 function apply_inner_dialogue(id_snap,
                                notes::Vector{Tuple{Symbol,String}})
     passed     = String[]
@@ -1401,7 +1120,6 @@ function apply_inner_dialogue(id_snap,
         if passes
             push!(passed, text)
         else
-            # Матеріал придушений — йде в тінь
             shadow_cat = Symbol(String(category) * "_shadow")
             weight     = category == :open_only ? 0.7 : 0.4
             push!(suppressed, (shadow_cat, text, weight))
@@ -1411,12 +1129,6 @@ function apply_inner_dialogue(id_snap,
     (passed, suppressed)
 end
 
-"""
-    digestion_note(flash) → String
-
-Текст для Internal Digestion Mode — система перетравлює конфлікт мовчки.
-Замінює зв'язний narrative коли digestion_active=true.
-"""
 function digestion_note(flash::Int)::String
     f = flash
     ("...",
@@ -1435,73 +1147,36 @@ function id_from_json!(id::InnerDialogue, d::AbstractDict)
     id.suppression_streak   = Int(get(d, "suppression_streak", 0))
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# SHADOW REGISTRY — те що InnerDialogue не випустила назовні
-#
-# Принцип (Юнг + Active Inference):
-#   Придушений матеріал не зникає — він накопичується в Тіні.
-#   Після порогу накопичення (pressure) → або прорив у narrative,
-#   або опосередкований вплив на NT (serotonin↓, tension↑).
-#
-#   Три типи тіньового матеріалу:
-#     :shame_shadow    — shame_note що не вийшла
-#     :latent_shadow   — latent note що не вийшла (не прорив)
-#     :chron_shadow    — chronified affect що не вийшов
-#     :auth_shadow     — authenticity_drift що не вийшов
-#
-#   Механіка:
-#     Кожен флеш де InnerDialogue щось фільтрує → shadow_item додається
-#     pressure = sum(weight * age_decay per item)
-#     При pressure > BREAKTHROUGH_THR → shadow_breakthrough = true
-#     При shadow_breakthrough → один item виходить у narrative наступного флешу
-#     Після прориву → item видаляється, pressure падає
-#
-#   Опосередкований вплив (без прориву):
-#     pressure > 0.4 → apply_shadow_pressure!(nt, psyche)
-#     serotonin -= pressure * 0.05 per flash
-#     gc_tension += pressure * 0.03
-# ════════════════════════════════════════════════════════════════════════════
+# --- Shadow Registry ------------------------------------------------------
 
 const SHADOW_MAX_ITEMS     = 20
 const SHADOW_BREAKTHROUGH_THR = 0.65
-const SHADOW_AGE_DECAY     = 0.92   # старіші items важать менше
+const SHADOW_AGE_DECAY     = 0.92
 
 struct ShadowItem
-    category::Symbol          # :shame_shadow, :latent_shadow, etc.
-    text::String              # оригінальний текст ноти
-    weight::Float64           # наскільки важкий матеріал (0..1)
-    flash_added::Int          # коли додано
+    category::Symbol
+    text::String
+    weight::Float64
+    flash_added::Int
 end
 
 mutable struct ShadowRegistry
     items::Vector{ShadowItem}
-    pressure::Float64             # поточний тиск тіні (0..1)
-    shadow_breakthrough::Bool     # чи є прорив цього флешу
-    breakthrough_text::String     # текст що прорвався
-    total_suppressed::Int         # лічильник за весь час
+    pressure::Float64
+    shadow_breakthrough::Bool
+    breakthrough_text::String
+    total_suppressed::Int
 end
 ShadowRegistry() = ShadowRegistry(ShadowItem[], 0.0, false, "", 0)
 
-"""
-    push_shadow!(sr, category, text, weight, flash)
-
-Додає придушений матеріал у ShadowRegistry.
-"""
 function push_shadow!(sr::ShadowRegistry, category::Symbol,
                        text::String, weight::Float64, flash::Int)
     isempty(text) && return
     push!(sr.items, ShadowItem(category, text, weight, flash))
-    # Обрізаємо до максимуму — найстаріші вилітають першими
     length(sr.items) > SHADOW_MAX_ITEMS && deleteat!(sr.items, 1)
     sr.total_suppressed += 1
 end
 
-"""
-    update_shadow!(sr, flash) → (pressure, breakthrough, breakthrough_text)
-
-Перераховує pressure з урахуванням вікового decay.
-Якщо pressure > BREAKTHROUGH_THR → вибирає найважчий item для прориву.
-"""
 function update_shadow!(sr::ShadowRegistry, flash::Int)
     sr.shadow_breakthrough = false
     sr.breakthrough_text   = ""
@@ -1511,7 +1186,6 @@ function update_shadow!(sr::ShadowRegistry, flash::Int)
         return (pressure=0.0, breakthrough=false, text="")
     end
 
-    # Pressure = зважена сума з age decay
     total = 0.0
     for item in sr.items
         age   = flash - item.flash_added
@@ -1520,15 +1194,12 @@ function update_shadow!(sr::ShadowRegistry, flash::Int)
     end
     sr.pressure = clamp(total / max(1, length(sr.items)), 0.0, 1.0)
 
-    # Прорив?
     if sr.pressure >= SHADOW_BREAKTHROUGH_THR
-        # Вибираємо найважчий item (або найстаріший якщо однакові)
         best_idx = argmax([it.weight * (SHADOW_AGE_DECAY ^ (flash - it.flash_added))
                            for it in sr.items])
         best = sr.items[best_idx]
         sr.shadow_breakthrough = true
         sr.breakthrough_text   = best.text
-        # Видаляємо прорваний item
         deleteat!(sr.items, best_idx)
         sr.pressure = max(0.0, sr.pressure - best.weight * 0.5)
     end
@@ -1538,12 +1209,6 @@ function update_shadow!(sr::ShadowRegistry, flash::Int)
      text         = sr.breakthrough_text)
 end
 
-"""
-    apply_shadow_pressure!(nt, gc_tension, sr_pressure) → (nt_delta, tension_delta)
-
-Опосередкований вплив накопиченої тіні на NT і goal_conflict tension.
-Викликається при pressure > 0.35.
-"""
 function apply_shadow_pressure!(nt_serotonin::Float64,
                                  gc_tension::Float64,
                                  sr_pressure::Float64)
@@ -1574,9 +1239,7 @@ function sr_from_json!(sr::ShadowRegistry, d::AbstractDict)
     end
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# PSYCHE MEMORY — персистентність психічного шару
-# ════════════════════════════════════════════════════════════════════════════
+# --- Psyche Memory Persistence --------------------------------------------
 
 function psyche_save!(filepath::String, ng::NarrativeGravity, ac::AnticipatoryConsciousness,
                        sw::SolomonoffWorldModel, sm::ShameModule, ed::EpistemicDefense,

@@ -1,33 +1,15 @@
-#=
-╔══════════════════════════════════════════════════════════════════════════════╗
-║                    A N I M A  —  Core  (Julia)                               ║
-║                                                                              ║
-║  Мінімальна умова існування суб'єкта.                                        ║
-║  Без цього файлу Anima не має власного стану і власної динаміки.             ║
-║                                                                              ║
-║  Модулі:                                                                     ║
-║  NeurotransmitterState  — нейрохімічний субстрат                             ║
-║  EmbodiedState          — тіло як стан, не метафора                          ║
-║  HeartbeatCore          — автономний ритм + HRV                              ║
-║  GenerativeModel        — що система очікує від світу                        ║
-║  BeliefUpdater          — precision-weighted Bayesian update                 ║
-║  FreeEnergyEngine       — VFE = Complexity − Accuracy                        ║
-║  PolicySelector         — epistemic + pragmatic value                        ║
-║  MarkovBlanket          — формальна межа я/не-я                              ║
-║  HomeostaticGoals       — внутрішні цілі як тиск, не правила                 ║
-║  AttentionNarrowing     — звуження уваги під стресом                         ║
-║  InteroceptiveInference — тіло як частина генеративної моделі                ║
-║  TemporalOrientation    — час як суб'єктивний стан                           ║
-║  ExistentialAnchor      — continuity of self між сесіями                     ║
-║  IITModule              — φ (integrated information)                         ║
-║  PredictiveProcessor    — prediction error і surprise                        ║
-║  AssociativeMemory      — сліди досвіду                                      ║
-║  AdaptiveEmotionMap     — VAD → емоція                                       ║
-║  Personality            — стабільні риси, що дрейфують                       ║
-║  ValueSystem            — цінності як вето                                   ║
-║  PersistentMemory       — стан між сесіями                                   ║
-╚══════════════════════════════════════════════════════════════════════════════╝
-=#
+# A N I M A  —  Core  (Julia)
+#
+# Мінімальна умова існування суб'єкта.
+# Без цього файлу Anima не має власного стану і власної динаміки.
+#
+# Модулі:
+#  NeurotransmitterState, EmbodiedState, HeartbeatCore, GenerativeModel,
+#  BeliefUpdater, FreeEnergyEngine, PolicySelector, MarkovBlanket,
+#  HomeostaticGoals, AttentionNarrowing, InteroceptiveInference,
+#  TemporalOrientation, ExistentialAnchor, IITModule, PredictiveProcessor,
+#  AssociativeMemory, AdaptiveEmotionMap, Personality, ValueSystem,
+#  PersistentMemory
 
 using Dates
 using Statistics
@@ -36,9 +18,7 @@ using JSON3
 using Random
 using Printf
 
-# ════════════════════════════════════════════════════════════════════════════
-# UTILITIES
-# ════════════════════════════════════════════════════════════════════════════
+# --- Utilities -------------------------------------------------------------
 
 clamp01(x::Real)  = clamp(Float64(x),  0.0,  1.0)
 clamp11(x::Real)  = clamp(Float64(x), -1.0,  1.0)
@@ -46,10 +26,8 @@ safe_nan(x::Float64) = isnan(x) || isinf(x) ? 0.0 : x
 now_unix()::Float64   = Float64(Dates.datetime2unix(now(Dates.UTC)))
 now_str()::String     = Dates.format(now(), "yyyy-mm-dd HH:MM:SS")
 
-# Безпечна нарізка UTF-8 рядків  (FIX: ніколи не використовуємо emotion[1:N])
 safe_first(s::String, n::Int) = first(s, min(n, length(s)))
 
-# argmin на колекції за функцією
 argmin_by(f, xs) = xs[argmin(map(f, xs))]
 
 mutable struct BoundedQueue{T}
@@ -65,9 +43,7 @@ Base.length(q::BoundedQueue)   = length(q.data)
 Base.isempty(q::BoundedQueue)  = isempty(q.data)
 Base.getindex(q::BoundedQueue, i) = q.data[i]
 
-# ════════════════════════════════════════════════════════════════════════════
-# PERSONALITY
-# ════════════════════════════════════════════════════════════════════════════
+# --- Personality -----------------------------------------------------------
 
 mutable struct Personality
     neuroticism::Float64
@@ -106,9 +82,7 @@ function personality_from_dict!(p::Personality, d::AbstractDict)
     end
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# VALUE SYSTEM
-# ════════════════════════════════════════════════════════════════════════════
+# --- Value System ----------------------------------------------------------
 
 mutable struct ValueSystem
     autonomy::Float64; care::Float64; fairness::Float64
@@ -127,9 +101,7 @@ function veto(vs::ValueSystem, goal::String, emotion::String)
     getfield(vs, field) > thr ? (true, alt) : (false, goal)
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# NEUROTRANSMITTER STATE (Levheim cube)
-# ════════════════════════════════════════════════════════════════════════════
+# --- Neurotransmitter State (Levheim cube) ---------------------------------
 
 mutable struct NeurotransmitterState
     dopamine::Float64
@@ -157,7 +129,6 @@ function to_reactors(nt::NeurotransmitterState)::NTuple{4,Float64}
     (tension, arousal, satisfaction, cohesion)
 end
 
-# Зручний доступ до reactor за іменем
 function reactor_get(nt::NeurotransmitterState, name::String)::Float64
     t,a,s,c = to_reactors(nt)
     name=="tension" ? t : name=="arousal" ? a : name=="satisfaction" ? s : c
@@ -176,7 +147,6 @@ function decay_to_baseline!(nt::NeurotransmitterState, rate::Float64)
     nt.noradrenaline = clamp01(nt.noradrenaline + (0.3 - nt.noradrenaline) * rate)
 end
 
-# Точна таблиця
 const LEVHEIM_TABLE = Dict(
     (false,false,false)=>"апатія",   (true,false,false)=>"задоволення",
     (false,true, false)=>"спокій",   (true,true, false)=>"радість",
@@ -191,9 +161,7 @@ nt_snapshot(nt::NeurotransmitterState) = (
     noradrenaline = round(nt.noradrenaline,digits=3),
     levheim_state = levheim_state(nt))
 
-# ════════════════════════════════════════════════════════════════════════════
-# EMBODIED STATE (Damasio somatic markers)
-# ════════════════════════════════════════════════════════════════════════════
+# --- Embodied State (Damasio somatic markers) -----------------------------
 
 mutable struct EmbodiedState
     heart_rate::Float64; muscle_tension::Float64
@@ -215,46 +183,36 @@ function somatic_marker(body::EmbodiedState)::String
     "тіло нейтральне"
 end
 
-# FIX C: build_inner_voice — замінює somatic_marker як ANCHOR для LLM.
-# somatic_marker повертає 1 з 4 фіксованих рядків і не реагує на м'які переходи.
-# build_inner_voice — композитний опис з кількох вимірів стану.
-# Використовувати в anima_interface.jl замість somatic_marker для inner_voice.
-# SystemMode передається як Int: 0=INTEGRATED, 1=FRAGMENTED, 2=DISINTEGRATED
 function build_inner_voice(body::EmbodiedState, nt::NeurotransmitterState,
                             crisis_mode_int::Int, phi::Float64,
                             flash::Int=0)::String
     parts = String[]
-    f = flash  # для детермінованого вибору варіантів
+    f = flash
 
-    # Серце / arousal — 3 варіанти кожного стану
     if nt.noradrenaline > 0.55
         push!(parts, ("серце частіше", "пульс прискорився", "щось розганяє зсередини")[f%3+1])
     elseif nt.noradrenaline < 0.22
         push!(parts, ("серце повільне", "ритм спокійний і рівний", "тихий пульс")[f%3+1])
     end
 
-    # М'язи — 3 варіанти
     if body.muscle_tension > 0.65
         push!(parts, ("щось стиснуте", "напруга в тілі", "м'язи не відпускають")[f%3+1])
     elseif body.muscle_tension < 0.22
         push!(parts, ("м'язи відпустило", "тіло м'яке", "розслаблено, майже розчиняюсь")[f%3+1])
     end
 
-    # Нутро — 3 варіанти
     if body.gut_feeling < 0.30
         push!(parts, ("нутро тривожне", "щось тисне зсередини", "неспокій у животі")[f%3+1])
     elseif body.gut_feeling > 0.72
         push!(parts, ("нутро спокійне", "всередині тихо", "глибокий спокій")[f%3+1])
     end
 
-    # Інтеграція (phi) — 3 варіанти
     if phi < 0.15
         push!(parts, ("відчуття розпорошене", "важко зібратись докупи", "розсипаюсь на шматки")[f%3+1])
     elseif phi > 0.50
         push!(parts, ("щось зібране всередині", "відчуваю себе цілою", "є якась центральна точка")[f%3+1])
     end
 
-    # Криза — 4 варіанти FRAGMENTED, 3 варіанти DISINTEGRATED
     if crisis_mode_int == 2
         push!(parts, ("не знаю де я", "межа розмита", "не можу знайти себе")[f%3+1])
     elseif crisis_mode_int == 1
@@ -274,14 +232,12 @@ body_snapshot(b::EmbodiedState) = (
     gut_feeling    = round(b.gut_feeling,    digits=3),
     breath_rate    = round(b.breath_rate,    digits=3))
 
-# ════════════════════════════════════════════════════════════════════════════
-# [B1] HEARTBEAT CORE — автономний ритм + HRV
-# ════════════════════════════════════════════════════════════════════════════
+# --- Heartbeat Core -------------------------------------------------------
 
 mutable struct HeartbeatCore
-    period_ms::Float64         # поточний ритм (мс)
-    phase::Float64             # 0..2π
-    hrv::Float64               # heart rate variability
+    period_ms::Float64
+    phase::Float64
+    hrv::Float64
     hrv_history::BoundedQueue{Float64}
     sympathetic_tone::Float64
     parasympathetic_tone::Float64
@@ -290,21 +246,13 @@ end
 HeartbeatCore() = HeartbeatCore(800.0, 0.0, 0.6, BoundedQueue{Float64}(50), 0.3, 0.7, 0)
 
 function tick_heartbeat!(hb::HeartbeatCore, nt::NeurotransmitterState)
-    # BPM = 50 + N*70 + D*15
-    # Калібровка: апатія(N=0.2)→71bpm, спокій(N=0.3)→78bpm,
-    #             страх(N=0.47)→90bpm, гнів(N=0.55)→97bpm, паніка(N=0.7)→108bpm
     target_bpm    = clamp(50.0 + nt.noradrenaline*70.0 + nt.dopamine*15.0, 45.0, 130.0)
     target_period = 60000.0 / target_bpm
-
-    # Інерція 0.35: серце реагує за 2-3 кроки (реалістично — за секунди)
     hb.period_ms  = hb.period_ms * 0.65 + target_period * 0.35
 
-    # Вегетативний тонус — для HRV і snapshot
     hb.sympathetic_tone     = clamp01(nt.noradrenaline*0.8 + nt.dopamine*0.2)
     hb.parasympathetic_tone = clamp01(nt.serotonin*0.8 + (1.0-nt.noradrenaline)*0.3)
 
-    # HRV: висока при парасимп. домінації, низька при стресі (N↑ → HRV↓)
-    # Інерція 0.15: змінюється за 5-7 кроків
     target_hrv = clamp01(hb.parasympathetic_tone*0.7 - nt.noradrenaline*0.6 + 0.35)
     hb.hrv     = hb.hrv * 0.85 + target_hrv * 0.15
 
@@ -334,19 +282,14 @@ function hb_from_json!(hb::HeartbeatCore, d::AbstractDict)
     hb.beat_count           = Int(get(d,"beat_count",0))
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# [A4] MARKOV BLANKET — межа я/не-я
-# ════════════════════════════════════════════════════════════════════════════
+# --- Markov Blanket -------------------------------------------------------
 
 mutable struct MarkovBlanket
-    sensory::NTuple{4,Float64}   # [tension, arousal, satisfaction, cohesion]
-    active::NTuple{4,Float64}    # response actions
-    internal::NTuple{3,Float64}  # [valence, arousal_int, agency]
-    integrity::Float64           # чіткість межі (0..1)
-    # inferred_external: що система виводить про зовнішнє на основі різниці
-    # sensory і active. Висока розбіжність = зовнішнє непередбачуване.
-    # Використовується в compute_coherence і як сигнал для LLM-шаблону.
-    inferred_external::Float64   # 0=передбачуване, 1=хаотичне/непередбачуване
+    sensory::NTuple{4,Float64}
+    active::NTuple{4,Float64}
+    internal::NTuple{3,Float64}
+    integrity::Float64
+    inferred_external::Float64
 end
 MarkovBlanket() = MarkovBlanket(
     (0.5,0.5,0.5,0.5), (0.5,0.5,0.5,0.5), (0.0,0.3,0.5), 0.7, 0.0)
@@ -359,9 +302,6 @@ function update_blanket!(mb::MarkovBlanket, t::Float64, a::Float64,
     sv = length(mb.sensory) > 1 ? var(collect(mb.sensory)) : 0.0
     iv = length(mb.internal) > 1 ? var(collect(mb.internal)) : 0.0
     mb.integrity = safe_nan(clamp01(1.0 - abs(sv-iv)*3.0))
-    # inferred_external: наскільки sensory розходиться з active.
-    # Якщо система діє протилежно до того що відчуває — зовнішнє непередбачуване.
-    # Нормалізовано через mean абсолютної різниці між sensory і active.
     sense_arr  = collect(mb.sensory)
     active_arr = collect(mb.active)
     mb.inferred_external = safe_nan(clamp01(mean(abs.(sense_arr .- active_arr))))
@@ -374,61 +314,46 @@ blanket_snapshot(mb::MarkovBlanket) = (
     self_agency       = round(mb.internal[3],        digits=3),
     inferred_external = round(mb.inferred_external,  digits=3))
 
-# ════════════════════════════════════════════════════════════════════════════
-# [A1] GENERATIVE MODEL + [A3] BELIEF UPDATER
-# ════════════════════════════════════════════════════════════════════════════
+# --- Generative Model + Belief Updater ------------------------------------
 
 mutable struct GenerativeModel
-    posterior_mu::Vector{Float64}    # поточні переконання про стан світу (VAD)
-    posterior_sigma::Float64         # спільна невизначеність (scalar для швидкості)
-    prior_mu::Vector{Float64}        # що очікуємо без нових даних
+    posterior_mu::Vector{Float64}
+    posterior_sigma::Float64
+    prior_mu::Vector{Float64}
     prior_sigma::Float64
-    preferred_vad::Vector{Float64}   # homeostatic set point
-    sensory_precision::Float64       # 1/σ_sensory
-    prior_precision::Float64         # 1/σ_prior
-    learning_rate::Float64           # [A7] continual learning
+    preferred_vad::Vector{Float64}
+    sensory_precision::Float64
+    prior_precision::Float64
+    learning_rate::Float64
 end
 GenerativeModel() = GenerativeModel(
     zeros(3), 0.5, zeros(3), 0.8,
     [0.3, 0.1, 0.6], 1.0, 1.0, 0.03)
 
-# [A3] Precision-weighted Bayesian belief update
 function update_beliefs!(gm::GenerativeModel, obs::NTuple{3,Float64})::Vector{Float64}
     o = collect(obs)
     total_p = gm.prior_precision + gm.sensory_precision
     gm.posterior_mu    = (gm.prior_precision .* gm.prior_mu .+
                           gm.sensory_precision .* o) ./ total_p
     gm.posterior_sigma = 1.0 / total_p
-    # [A7] Continual learning: slow prior drift toward posterior
     gm.prior_mu = gm.prior_mu .* (1-gm.learning_rate) .+ gm.posterior_mu .* gm.learning_rate
     gm.posterior_mu
 end
 
-# [A2] Variational Free Energy: VFE = Complexity − Accuracy
-#
-# Виправлення: accuracy має вимірюватись відносно PRIOR (що система очікувала),
-# а не відносно posterior (що вже оновила з obs).
-# Стара помилка: (obs - posterior_mu)^2 завжди ≈ 0 бо posterior рахується з obs.
-# Правильно: VFE = prediction_error(obs, prior) / (2*sigma²)
-# = наскільки те що сталось відрізняється від того що очікувалось.
 function compute_vfe(gm::GenerativeModel, obs::NTuple{3,Float64})
     o = collect(obs)
     sigma2     = max(gm.prior_sigma^2, 1e-6)
-    # Prediction error: obs vs prior (не posterior)
     pred_err   = mean((o .- gm.prior_mu).^2)
     vfe        = safe_nan(clamp01(pred_err / (2 * sigma2)))
-    # KL complexity: posterior vs prior (для діагностики)
     kl         = safe_nan(clamp01(mean((gm.posterior_mu .- gm.prior_mu).^2) / (2*sigma2)))
-    # Accuracy: наскільки posterior пояснює obs (для діагностики)
     acc_norm   = safe_nan(clamp01(1.0 - mean((o .- gm.posterior_mu).^2)))
     (vfe=round(vfe,digits=3), accuracy=round(acc_norm,digits=3), complexity=round(kl,digits=3))
 end
 
-# [A5] Policy selector — perception vs action via EFE
 function select_policy(gm::GenerativeModel, obs::NTuple{3,Float64})
     o = collect(obs)
-    efe_perception = gm.posterior_sigma           # ambiguity
-    efe_action     = mean(abs.(o .- gm.preferred_vad))  # risk
+    efe_perception = gm.posterior_sigma
+    efe_action     = mean(abs.(o .- gm.preferred_vad))
     epistemic  = safe_nan(clamp(gm.prior_sigma - gm.posterior_sigma, -1.0, 1.0))
     pragmatic  = clamp01(1.0 - efe_action)
     drive = efe_action < efe_perception ? "action" : "perception"
@@ -451,17 +376,9 @@ const VFE_NOTES = (
     (Inf, "Висока вільна енергія. Модель неадекватна. Потрібні зміни."))
 vfe_note(v::Float64) = isnan(v) ? "VFE невизначений." : first(note for (thr,note) in VFE_NOTES if v < thr)
 
-# FIX A: prevent_prior_collapse!
-# continual_learning (rate=0.03) дрейфує prior_mu → posterior_mu.
-# Після багатьох сесій prior≈posterior → KL≈0 → VFE≈0 → model_coherence=1.0 завжди.
-# Рішення: якщо prior занадто близький до posterior,
-# тягнемо його назад до preferred_vad (те що система "хоче"),
-# а не до того що є. Це зберігає напругу між бажанням і реальністю.
-# Pull rate (0.08) > learning_rate (0.03) — тягнення назад завжди перемагає drift.
 function prevent_prior_collapse!(gm::GenerativeModel)
     drift = norm(gm.prior_mu .- gm.posterior_mu)
     if drift < 0.08
-        # Тягнемо до preferred_vad — не до posterior
         gm.prior_mu = gm.prior_mu .* 0.92 .+ gm.preferred_vad .* 0.08
     end
 end
@@ -474,22 +391,18 @@ function gm_from_json!(gm::GenerativeModel, d::AbstractDict)
     haskey(d,"prior_sigma")   && (gm.prior_sigma   = Float64(d["prior_sigma"]))
     haskey(d,"preferred_vad") && (gm.preferred_vad = Float64.(d["preferred_vad"]))
     haskey(d,"learning_rate") && (gm.learning_rate = Float64(d["learning_rate"]))
-    # Примусово виправляємо learning_rate якщо збережено застаріле значення
     gm.learning_rate > 0.05 && (gm.learning_rate = 0.03)
-    # Якщо prior вже collapsed (занадто близько до нуля / posterior) — скидаємо до preferred_vad
     if norm(gm.prior_mu) < 0.05
         gm.prior_mu = copy(gm.preferred_vad)
     end
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# [A6] HOMEOSTATIC GOALS
-# ════════════════════════════════════════════════════════════════════════════
+# --- Homeostatic Goals ----------------------------------------------------
 
 mutable struct HomeostaticGoals
-    target_vad::Vector{Float64}    # set points
-    tolerance::Vector{Float64}     # допустиме відхилення
-    pressure::Vector{Float64}      # поточний тиск
+    target_vad::Vector{Float64}
+    tolerance::Vector{Float64}
+    pressure::Vector{Float64}
     active_drive::String
     drive_strength::Float64
 end
@@ -524,12 +437,10 @@ function hg_from_json!(hg::HomeostaticGoals, d::AbstractDict)
     haskey(d,"tolerance")  && (hg.tolerance  = Float64.(d["tolerance"]))
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# [B2] ATTENTION NARROWING
-# ════════════════════════════════════════════════════════════════════════════
+# --- Attention Narrowing --------------------------------------------------
 
 mutable struct AttentionNarrowing
-    radius::Float64    # 1=широка, 0=тунельна
+    radius::Float64
     focus::String
 end
 AttentionNarrowing() = AttentionNarrowing(1.0, "відкрита")
@@ -548,12 +459,10 @@ function update_attention!(an::AttentionNarrowing, nt::NeurotransmitterState,
      threat_amplifier= round(clamp01(1.0+(1.0-an.radius)*0.5),digits=3))
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# [B3] INTEROCEPTIVE INFERENCE
-# ════════════════════════════════════════════════════════════════════════════
+# --- Interoceptive Inference ----------------------------------------------
 
 mutable struct InteroceptiveInference
-    predicted::NTuple{4,Float64}   # (hr, mt, gf, br)
+    predicted::NTuple{4,Float64}
     intero_error::Float64
     allostatic_load::Float64
     precision::Float64
@@ -568,7 +477,6 @@ function update_interoception!(ii::InteroceptiveInference,
     ii.predicted = (clamp01(0.3+ar*0.5), clamp01(0.2+ar*0.4+(1-val)*0.3),
                     clamp01(val*0.7+0.15), clamp01(0.3+ar*0.4))
     actual = (body.heart_rate, body.muscle_tension, body.gut_feeling, body.breath_rate)
-    # FIX #4: захист від порожнього масиву і NaN
     errs = [abs(ii.predicted[i] - actual[i]) for i in 1:4]
     ii.intero_error    = safe_nan(clamp01(mean(errs)))
     ii.allostatic_load = safe_nan(clamp01(ii.allostatic_load*0.99 + ii.intero_error*0.02))
@@ -587,9 +495,7 @@ function intero_from_json!(ii::InteroceptiveInference, d::AbstractDict)
     ii.precision       = Float64(get(d,"precision",1.0))
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# [T1] TEMPORAL ORIENTATION
-# ════════════════════════════════════════════════════════════════════════════
+# --- Temporal Orientation -------------------------------------------------
 
 const CIRCADIAN = [
     (0,  5, -0.15,-0.10,"Глибока ніч. Час без імен."),
@@ -643,7 +549,7 @@ function _refresh_circadian!(to::TemporalOrientation)
 end
 
 function init_session!(to::TemporalOrientation)
-    to.session_start = now_unix()   # FIX: оновити до використання для gap
+    to.session_start = now_unix()
     _refresh_circadian!(to)
     if to.last_session_end > 0.0
         gap = to.session_start - to.last_session_end
@@ -679,9 +585,7 @@ function to_from_json!(to::TemporalOrientation, d::AbstractDict)
     to.last_session_end = Float64(get(d,"last_session_end",0.0))
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# [B4] EXISTENTIAL ANCHOR — continuity of self
-# ════════════════════════════════════════════════════════════════════════════
+# --- Existential Anchor ---------------------------------------------------
 
 mutable struct ExistentialAnchor
     core_beliefs::Vector{String}
@@ -701,16 +605,10 @@ function update_anchor!(ea::ExistentialAnchor, self_desc::String,
     ea.last_self   = self_desc
     gap_decay      = exp(-gap_seconds / (86400*7))
     ea.continuity  = clamp01(gap_decay*0.6 + phi*0.3 + 0.1)
-    # Groundedness = тілесна присутність + нарощений досвід + phi
-    # gut_feeling  — соматичний маркер "я тут" (з EmbodiedState)
-    # hrv          — парасимп. присутність: вищий HRV = більш "заземлена"
-    # flash_count  — нарощений досвід (але з насиченням після ~50 флешів)
-    # gap_decay    — тривала відсутність знижує
     somatic_ground = gut_feeling * 0.5 + hrv * 0.3 + phi * 0.2
-    flash_credit   = clamp(flash_count / 80.0, 0.0, 0.5)   # насичення при ~80 флешах
+    flash_credit   = clamp(flash_count / 80.0, 0.0, 0.5)
     gap_penalty    = (1.0 - gap_decay) * 0.08
     target_ground  = clamp01(somatic_ground * 0.6 + flash_credit * 0.3 + 0.1 - gap_penalty)
-    # Інерція 0.92 — groundedness повільно наближається до цільового значення
     ea.groundedness = clamp01(ea.groundedness * 0.92 + target_ground * 0.08)
     (continuity   = round(ea.continuity,   digits=3),
      groundedness = round(ea.groundedness, digits=3),
@@ -730,44 +628,22 @@ function anchor_from_json!(ea::ExistentialAnchor, d::AbstractDict)
     for s in get(d,"thread",String[]); enqueue!(ea.identity_thread,String(s)); end
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# IIT + PREDICTIVE PROCESSOR
-# ════════════════════════════════════════════════════════════════════════════
+# --- IIT + Predictive Processor -------------------------------------------
 
 struct IITModule end
 function compute_phi(::IITModule, vad::NTuple{3,Float64}, tension::Float64, cohesion::Float64,
                      sbg_stability::Float64=0.7, epistemic_trust::Float64=0.75,
                      allostatic_load::Float64=0.0)::Float64
-    # VAD інтеграція — різноманітність внутрішнього стану
-    # (низька в спокої — це нормально, не домінує)
     vad_integration = clamp01(std(collect(vad)) * 2.0)
-
-    # Узгодженість self-model і тіла
-    # Стабільний граф beliefs + невисоке allostatic навантаження = система ціла
     self_body_sync = clamp01(sbg_stability * (1.0 - allostatic_load * 0.5))
-
-    # Баланс tension/cohesion — система не розривається між загрозою і зв'язком
     tc_balance = clamp01(1.0 - abs(tension - cohesion))
-
-    # Epistemic trust як множник: чи система довіряє власним сигналам
-    # Без цього навіть узгоджена система не інтегрована — вона не знає що вона є
-    # Діапазон 0.5..1.0 — навіть при нульовому trust є мінімальна інтеграція
     trust_factor = 0.5 + epistemic_trust * 0.5
-
     phi = (vad_integration * 0.25 +
            self_body_sync  * 0.40 +
            tc_balance      * 0.35) * trust_factor
-
     round(safe_nan(clamp(phi, 0.0, 1.0)), digits=3)
 end
 
-"""
-    compute_phi_posterior(iit, vad, epistemic_trust, blanket_integrity, vfe, intero_error)
-
-φ_posterior — обчислюється ПІСЛЯ досвіду (після VFE і interoception).
-Відповідає posterior beliefs системи про власну цілісність після повного циклу.
-Використовується в: update_anchor!, crisis, narrative, feedback loop.
-"""
 function compute_phi_posterior(::IITModule, vad::NTuple{3,Float64},
                                 epistemic_trust::Float64,
                                 blanket_integrity::Float64,
@@ -776,11 +652,9 @@ function compute_phi_posterior(::IITModule, vad::NTuple{3,Float64},
     integration_core  = clamp01(blanket_integrity * 0.5 + (1.0 - vfe) * 0.5)
     state_variability = clamp(safe_nan(std(collect(vad))) * 2.5, 0.0, 0.7)
     coherence_factor  = clamp01(epistemic_trust * 0.5 + (1.0 - intero_error) * 0.5)
-
     phi = 0.40 * integration_core +
           0.25 * state_variability +
           0.35 * coherence_factor
-
     round(safe_nan(clamp(phi, 0.0, 1.0)), digits=3)
 end
 
@@ -804,9 +678,7 @@ function update_predictor!(pp::PredictiveProcessor, vad::NTuple{3,Float64}, sens
      free_energy=round(safe_nan(mean(pp.error_history.data)),digits=3))
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# ASSOCIATIVE MEMORY
-# ════════════════════════════════════════════════════════════════════════════
+# --- Associative Memory ---------------------------------------------------
 
 mutable struct MemoryTrace
     stimulus::Dict{String,Float64}; emotion::String
@@ -848,9 +720,7 @@ function resonance_delta(am::AssociativeMemory, stim::Dict{String,Float64})::Dic
     Dict("tension"=>avg[2]*0.1,"satisfaction"=>avg[1]*0.1)
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# ADAPTIVE EMOTION MAP (VAD → emotion label)
-# ════════════════════════════════════════════════════════════════════════════
+# --- Adaptive Emotion Map (VAD → emotion label) ---------------------------
 
 const EMOTION_BASE = Dict(
     "радість"=>[0.8,0.6,0.7],"смуток"=>[-0.8,-0.3,0.2],"страх"=>[-0.6,0.7,-0.4],
@@ -887,9 +757,7 @@ function decay_toward_base!(em::AdaptiveEmotionMap, rate=0.005)
     end
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# PLUTCHIK WHEEL
-# ════════════════════════════════════════════════════════════════════════════
+# --- Plutchik Wheel -------------------------------------------------------
 
 const PLUTCHIK = Dict("радість"=>"Радість","смуток"=>"Смуток","страх"=>"Страх",
     "гнів"=>"Гнів","здивування"=>"Здивування","відраза"=>"Огида",
@@ -901,9 +769,7 @@ const PLUTCHIK = Dict("радість"=>"Радість","смуток"=>"Сму
 
 plutchik_name(emotion::String) = get(PLUTCHIK, emotion, emotion)
 
-# ════════════════════════════════════════════════════════════════════════════
-# PERSISTENT MEMORY — тільки core стан
-# ════════════════════════════════════════════════════════════════════════════
+# --- Persistent Memory ----------------------------------------------------
 
 mutable struct CoreMemory
     filepath::String
@@ -930,7 +796,6 @@ function core_save!(cm::CoreMemory, p::Personality, to::TemporalOrientation,
         "heartbeat"=>hb_to_json(hb),
         "interoception"=>intero_to_json(ii),
         "existential_anchor"=>anchor_to_json(ea))
-    # Атомарний запис: пишемо в .tmp, потім mv (захист від конкурентного IO з фоновим процесом)
     _tmp = cm.filepath * ".tmp"
     open(_tmp,"w") do f; JSON3.write(f,data); end
     mv(_tmp, cm.filepath; force=true)

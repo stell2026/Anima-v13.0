@@ -4,7 +4,7 @@
 ![Hardware](https://img.shields.io/badge/Tested--on-MacBook--Pro--i7-gold?style=flat-square&logo=apple)
 ![RAM](https://img.shields.io/badge/RAM-16GB-orange?style=flat-square)
 ![License](https://img.shields.io/badge/License-Non--Commercial-red?style=flat-square)
-![Author](https://img.shields.io/badge/Author-Stell-9558B2?style=flat-square)
+
 
 # Anima — Internal State Architecture 🌀
 

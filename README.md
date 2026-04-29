@@ -226,7 +226,7 @@ Each note function (`build_inner_voice`, `_crisis_note`, `sig_note`, `shame_note
 
 Micro-update after each `memory_write_event!` — stress, anxiety, motivation_bias accumulate incrementally rather than through a threshold. `MEM_CONSOLIDATE_THRESHOLD` lowered from 0.55 → 0.35.
 
-### Dreams — Phase B3
+### Dreams
 
 New file `anima_dream.jl`. While the system "sleeps" (night + gap>30min) — 5% chance per slow_tick that it reconstructs a dialog_history fragment as a dream. NT shifts × 0.25, `memory_uncertainty +0.15`, written to `anima_dream.json`. `:dreams` command in REPL.
 

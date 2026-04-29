@@ -607,7 +607,7 @@ function repl_with_background!(a::Anima;
     println("\n" * "═"^70)
     println("  🌀 A N I M A — REPL")
     subj_label = !isnothing(subj) ? " | 🧬 суб'єктність" : ""
-    println("  ♥ серце б'ється$(isnothing(mem) ? "" : " | 🧠 пам'ять активна")$subj_label")
+    println("  ❤️ серце б'ється$(isnothing(mem) ? "" : " | 🧠 пам'ять активна")$subj_label")
     println("  :bg :bgstop :bgstart :memory :subj :state :vfe :self :crisis :hb :gravity :anchor :solom :dreams :history :clearhist :quit")
     println("═"^70 * "\n")
 

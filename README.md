@@ -1,5 +1,5 @@
 ![Julia](https://img.shields.io/badge/Julia-1.9+-9558B2?style=flat-square&logo=julia)
-![Research Phase](https://img.shields.io/badge/Phase-Experimental---007ec6?style=flat-square)
+![Research Phase](https://img.shields.io/badge/Phase-Experimental--007ec6?style=flat-square)
 ![Framework](https://img.shields.io/badge/Methodology-Active--Inference-green?style=flat-square)
 ![Hardware](https://img.shields.io/badge/Tested--on-MacBook--Pro--i7-gold?style=flat-square&logo=apple)
 ![RAM](https://img.shields.io/badge/RAM-16GB-orange?style=flat-square)

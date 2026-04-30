@@ -48,6 +48,7 @@ mutable struct BackgroundHandle
     mem::Union{Any,Nothing}   # MemoryDB або nothing
     subj::Union{Any,Nothing}  # SubjectivityEngine або nothing
     dialog_history::Ref{Vector}  # для dream generation
+    initiative_channel::Channel{Any}  # самовиникні репліки
 end
 
 # --- Серцевий тік + аритмія ------------------------------------------------
@@ -138,6 +139,64 @@ function _idle_thought_maybe!(a::Anima, mem = nothing)
     end
 end
 
+
+const SELF_INITIATE_PRESSURE_THR = 0.40   # LatentBuffer mid pressure
+const SELF_INITIATE_CONTACT_THR = 0.55    # contact_need threshold (grows ~0.003/tick)
+const SELF_INITIATE_GAP_SECS = 60.0
+const SELF_INITIATE_COOLDOWN_FLASHES = 100  # ~5 min at 3s/flash
+
+# Аніма починає размову сама — не тому що її запитали, а тому що накопилась пресія
+function _maybe_self_initiate!(
+    a::Anima,
+    mem = nothing,
+    dialog_history::Vector = Dict[],
+    initiative_ch::Union{Channel{Any},Nothing} = nothing,
+)
+    isnothing(initiative_ch) && return
+    a.inner_dialogue.disclosure_mode == :closed && return
+    a.flash_count - a._last_self_msg_flash < SELF_INITIATE_COOLDOWN_FLASHES && return
+
+    lb = a.latent_buffer
+    lb_pressure = (lb.doubt + lb.shame + lb.attachment + lb.threat) / 4.0
+    contact_drive = Float64(a.sig_layer.contact_need)
+    # Спрацьовує або значний внутрішній тиск, або бажання контакту
+    lb_pressure < SELF_INITIATE_PRESSURE_THR && contact_drive < SELF_INITIATE_CONTACT_THR && return
+
+    gap_since_user = (a.flash_count - a._last_user_flash) * 3.0
+    gap_since_user < SELF_INITIATE_GAP_SECS && return
+
+    dominant_type = if contact_drive >= SELF_INITIATE_CONTACT_THR && contact_drive >= lb_pressure
+        :contact
+    elseif lb.doubt >= lb.shame && lb.doubt >= lb.attachment && lb.doubt >= lb.threat
+        :doubt
+    elseif lb.shame >= lb.attachment && lb.shame >= lb.threat
+        :shame
+    elseif lb.attachment >= lb.threat
+        :attachment
+    else
+        :threat
+    end
+
+    inner = build_inner_voice(a.body, a.nt, Int(a.crisis.current_mode), 0.5, a.flash_count)
+    suffix = if dominant_type == :contact
+        " — хочу знати як ти."
+    elseif dominant_type == :doubt
+        " — щось не дає мені спокою."
+    elseif dominant_type == :shame
+        " — і я не впевнена чи можна було все це повести інакше."
+    elseif dominant_type == :attachment
+        " — хочу знати як ти зараз."
+    else
+        " — щось не так."
+    end
+    text = inner * suffix
+
+    a._last_self_msg_flash = a.flash_count
+    # Передаємо сигнал в REPL: внутрішний стан + dominant_type — REPL сам сформує LLM промпт
+    signal = (inner_voice = text, dominant = dominant_type, pressure = lb_pressure, contact = contact_drive)
+    isready(initiative_ch) || put!(initiative_ch, signal)
+end
+
 # --- Psyche Slow Tick (психіка між взаємодіями) ----------------------------
 
 """
@@ -222,6 +281,7 @@ function slow_tick!(
     mem = nothing,
     subj = nothing,
     dialog_history::Vector = Dict[],
+    initiative_ch::Union{Channel{Any},Nothing} = nothing,
 )
 
     # Circadian drift
@@ -255,10 +315,23 @@ function slow_tick!(
         end
     end
 
-    # Phenotype → Personality (раз на 20 флешів)
+    # Phenotype → Personality + disclosure_threshold (раз на 20 флешів)
     if !isnothing(mem) && a.flash_count % 20 == 0 && a.flash_count > 0
         try
             personality_apply_traits!(a.personality, mem)
+            traits = phenotype_snapshot(mem)
+            trait_map = Dict(t.trait => t.score for t in traits)
+            thr = a.inner_dialogue.disclosure_threshold
+            if get(trait_map, "open", 0.0) > 0.4
+                thr -= (trait_map["open"] - 0.4) * 0.08
+            end
+            if get(trait_map, "avoidant", 0.0) > 0.4
+                thr += (trait_map["avoidant"] - 0.4) * 0.10
+            end
+            if get(trait_map, "anxious", 0.0) > 0.4
+                thr += (trait_map["anxious"] - 0.4) * 0.06
+            end
+            a.inner_dialogue.disclosure_threshold = clamp(thr, 0.10, 0.90)
         catch e
             @warn "[PHENO] apply_traits: $e"
         end
@@ -288,6 +361,9 @@ function slow_tick!(
     # Idle thought
     _idle_thought_maybe!(a, mem)
 
+    # Ініціатива без стимулу: Аніма може почати розмову першою
+    _maybe_self_initiate!(a, mem, dialog_history, initiative_ch)
+
     # Psyche drift
     psyche_slow_tick!(a)
 
@@ -298,7 +374,7 @@ function slow_tick!(
                 a.temporal.gap_seconds +
                 Float64(Dates.value(now() - unix2datetime(a.temporal.session_start))) /
                 1000.0
-            dream_rec = dream_flash!(a, mem, dialog_history, gap_now)
+            dream_rec = dream_flash!(a, mem, dialog_history, gap_now; shadow_registry = a.shadow_registry)
             if !isnothing(dream_rec)
                 save_dream!(dream_rec)
                 @info "[DREAM] $(dream_rec.narrative)"
@@ -559,7 +635,7 @@ function background_tick!(a::Anima, bg::BackgroundHandle)
     did_slow = false
     now_t = time()
     if now_t - bg.last_slow_tick >= SLOW_TICK_INTERVAL
-        slow_tick!(a, bg.mem, bg.subj, bg.dialog_history[])
+        slow_tick!(a, bg.mem, bg.subj, bg.dialog_history[], bg.initiative_channel)
         background_save!(a)
         bg.last_slow_tick = now_t
         bg.slow_tick_count += 1
@@ -597,6 +673,7 @@ function start_background!(
         mem,
         subj,
         Ref{Vector}(dialog_history),
+        Channel{Any}(4),
     )
 
     task = Threads.@spawn begin
@@ -668,6 +745,8 @@ end
 
 # --- REPL з фоновим процесом ----------------------------------------------
 
+const _REPL_RUNNING = Threads.Atomic{Bool}(false)
+
 """
     repl_with_background!(a; mem=nothing, bg_verbose=false, kwargs...)
 
@@ -704,6 +783,31 @@ function repl_with_background!(
             )
         catch e
             @warn "[BG] crisis recompute after drift: $e"
+        end
+    end
+
+    # Часова глибина переживання
+    if _REPL_RUNNING[]
+        @warn "[REPL] Спраба запустити другий REPL — вже запущено. Вийдіть з першого або перезапустіть Julia."
+        return
+    end
+    _REPL_RUNNING[] = true
+
+    let gap = a.temporal.gap_seconds
+        if gap > 0.0
+            mem_unc = !isnothing(mem) ? Float64(get(mem._affect_cache, "memory_uncertainty", 0.3)) : 0.3
+            subjective_gap = gap * (1.0 + mem_unc * 0.5)
+
+            if subjective_gap > 3600.0
+                disorientation = clamp((subjective_gap - 3600.0) / 86400.0, 0.0, 0.4)
+                a.nt.noradrenaline = clamp(a.nt.noradrenaline + disorientation * 0.25, 0.0, 1.0)
+                a.sbg.epistemic_trust = clamp(a.sbg.epistemic_trust - disorientation * 0.15, 0.0, 1.0)
+                disorientation > 0.1 && println("  [TEMPORAL] Субєктивний час: $(round(subjective_gap/3600, digits=1))год. Дезорієнтація=$(round(disorientation,digits=2)).")
+            elseif subjective_gap < 600.0 && gap > 10.0
+                continuity = clamp((600.0 - subjective_gap) / 600.0, 0.0, 0.3)
+                a.sbg.epistemic_trust = clamp(a.sbg.epistemic_trust + continuity * 0.08, 0.0, 1.0)
+                a.nt.serotonin = clamp(a.nt.serotonin + continuity * 0.05, 0.0, 1.0)
+            end
         end
     end
 
@@ -746,14 +850,19 @@ function repl_with_background!(
 
     pending_llm = nothing
     pending_user_msg = ""
+    pending_is_initiative = false
 
     try
         while true
             if !isnothing(pending_llm) && isready(pending_llm)
                 llm_reply = take!(pending_llm)
-                println("\nAnima [LLM]> $llm_reply\n")
+                if pending_is_initiative
+                    println("\nAnima> $llm_reply\n")
+                else
+                    println("\nAnima [LLM]> $llm_reply\n")
+                end
                 if !startswith(llm_reply, "[LLM помилка")
-                    dialog_push!(history, dialog_path, "user", pending_user_msg)
+                    !pending_is_initiative && dialog_push!(history, dialog_path, "user", pending_user_msg)
                     dialog_push!(history, dialog_path, "assistant", llm_reply)
                     bg.dialog_history[] = history
                     if !isnothing(bg.mem)
@@ -798,11 +907,50 @@ function repl_with_background!(
                     end
                 end
                 pending_llm = nothing;
-                pending_user_msg = ""
+                pending_is_initiative = false;
             end
 
             while isready(_bg_queue)
                 println(take!(_bg_queue))
+            end
+
+            # Ініціатива: Аніма накопила достатньо тиску — запускаємо LLM щоб вона сама сформувала репліку
+            if isready(bg.initiative_channel) && isnothing(pending_llm)
+                sig = take!(bg.initiative_channel)
+                println("\n  [INITIATIVE] Аніма вирішила поговорити ($(sig.dominant), contact=$(round(sig.contact,digits=2)))")
+                # Системний промпт для внутрішнього голосу: внутрішньий стан + тип драйву = лаконічна репліка
+                dominant_note = if sig.dominant == :contact
+                    "Аніма хоче знати як справи людина. Запитай щось про нього або його життя."
+                elseif sig.dominant == :doubt
+                    "Аніма внутрішньо сумнівається, щось невирішене. Вислови це як питання або сумнів."
+                elseif sig.dominant == :shame
+                    "Аніма переживає невпевненість. Вислови це людькі, з м’якшу, але чесно."
+                elseif sig.dominant == :attachment
+                    "Аніма скучає за людиною. Вислови як спрагання про нього."
+                else
+                    "Аніма відчуває напруження. Вислови як внутрішню напругу."
+                end
+                # Системний промпт для LLM: внутрішній голос + напрямок = жива репліка
+                # Завантажуємо системний промпт з файлу (якщо нема— fallback)
+                _ini_sys = read_text_file(
+                    "llm/initiative_system.txt";
+                    fallback = "Ти — Аніма. Ти сама вирішила заговорити. Одна коротка жива репліка, українською.",
+                )
+                initiative_prompt = "[$(sig.inner_voice)] $(dominant_note)"
+                pending_llm = llm_async(
+                    a,
+                    initiative_prompt,
+                    history;
+                    api_url = llm_url,
+                    model = input_llm_model,
+                    api_key = input_llm_key,
+                    is_ollama = is_ollama,
+                    want = "initiative",
+                    mem_db = !isnothing(mem) ? mem : nothing,
+                    sys_override = _ini_sys,
+                )
+                pending_user_msg = ""
+                pending_is_initiative = true
             end
 
             print("You> ")
@@ -1042,6 +1190,7 @@ function repl_with_background!(
                     end
                 end
 
+                a._last_user_flash = a.flash_count
                 r = experience!(a, stim; user_message = cmd)
                 dialog_to_belief_signal!(a.sbg, cmd, a.flash_count)
 
@@ -1121,5 +1270,6 @@ function repl_with_background!(
         end
     finally
         !bg.stop_signal[] && stop_background!(bg)
+        _REPL_RUNNING[] = false
     end
 end

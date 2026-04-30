@@ -72,7 +72,8 @@ function dream_flash!(
     a::Anima,
     mem,
     dialog_history::Vector,
-    gap_seconds::Float64,
+    gap_seconds::Float64;
+    shadow_registry = nothing,
 )::Union{DreamRecord,Nothing}
 
     isempty(dialog_history) && return nothing
@@ -103,19 +104,35 @@ function dream_flash!(
     _, fragment_text = rand(chosen_pool)
     isempty(fragment_text) && (fragment_text = "...")
 
+    # Shadow injection: якщо тиск достатній — сон може будуватись навколо shadow
+    shadow_source = false
+    if !isnothing(shadow_registry) && shadow_registry.pressure > 0.3 &&
+            !isempty(shadow_registry.items)
+        inject_prob = clamp((shadow_registry.pressure - 0.3) * 1.4, 0.0, 0.7)
+        if rand() < inject_prob
+            weighted = [(it.weight, it) for it in shadow_registry.items]
+            sort!(weighted, by = x -> -x[1])
+            shadow_item = weighted[1][2]
+            fragment_text = shadow_item.text
+            shadow_source = true
+        end
+    end
+
     fragment_short =
         length(fragment_text) > 120 ? first(fragment_text, 120) * "…" : fragment_text
 
     stim = _dream_stimulus_from_fragment(fragment_text)
 
     nt_before = (a.nt.dopamine, a.nt.serotonin, a.nt.noradrenaline)
-    _dream_update_state!(a, stim, mem)
+    _dream_update_state!(a, stim, mem; shadow_amplify = shadow_source)
     nt_after = (a.nt.dopamine, a.nt.serotonin, a.nt.noradrenaline)
     nt_delta =
         (nt_after[1]-nt_before[1], nt_after[2]-nt_before[2], nt_after[3]-nt_before[3])
 
+    # shadow-сон залишає більший слід невизначеності
+    uncert_delta = shadow_source ? 0.22 : 0.15
     a.unknown_register.memory_uncertainty =
-        clamp01(a.unknown_register.memory_uncertainty + 0.15)
+        clamp01(a.unknown_register.memory_uncertainty + uncert_delta)
 
     vad_now = to_vad(a.nt)
     t_, _, _, c_ = to_reactors(a.nt)
@@ -153,14 +170,15 @@ end
 
 # --- Оновлення стану під час сну --------------------------------------------
 
-function _dream_update_state!(a::Anima, stim::Dict, mem)
+function _dream_update_state!(a::Anima, stim::Dict, mem; shadow_amplify::Bool = false)
     valence = Float64(get(stim, "valence", 0.0))
     arousal = Float64(get(stim, "arousal", 0.5))
     tension = Float64(get(stim, "tension", 0.4))
 
-    d_delta = clamp(valence * 0.08 - tension * 0.04, -0.06, 0.06) * DREAM_NT_SCALE
-    s_delta = clamp(valence * 0.06 - arousal * 0.03, -0.05, 0.05) * DREAM_NT_SCALE
-    n_delta = clamp(tension * 0.07 + arousal * 0.04, -0.06, 0.06) * DREAM_NT_SCALE
+    amp = shadow_amplify ? 1.6 : 1.0
+    d_delta = clamp(valence * 0.08 - tension * 0.04, -0.06, 0.06) * DREAM_NT_SCALE * amp
+    s_delta = clamp(valence * 0.06 - arousal * 0.03, -0.05, 0.05) * DREAM_NT_SCALE * amp
+    n_delta = clamp(tension * 0.07 + arousal * 0.04, -0.06, 0.06) * DREAM_NT_SCALE * amp
 
     a.nt.dopamine = clamp01(a.nt.dopamine + d_delta)
     a.nt.serotonin = clamp01(a.nt.serotonin + s_delta)

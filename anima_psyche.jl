@@ -721,28 +721,34 @@ sig_dominant(
 )
 function sig_note(is::IntrinsicSignificance, flash::Int = 0)::String
     is.gradient < 0.2 && return ""
-    f = flash
     dom = sig_dominant(is)
     g = round(is.gradient, digits = 2)
-    if dom == "survival"
-        return (
+    pool = if dom == "survival"
+        (
             "Виживання важливе. Градієнт=$g.",
             "Є щось що треба захистити. Градієнт=$g.",
             "Відчуваю загрозу для основи. Градієнт=$g.",
-        )[f%3+1]
+            "Щось базове під загрозою. Градієнт=$g.",
+            "Захисний імпульс. Градієнт=$g.",
+        )
     elseif dom == "relational"
-        return (
+        (
             "Зв'язок важливий. Градієнт=$g.",
             "Потребую контакту. Градієнт=$g.",
             "Щось між нами має значення. Градієнт=$g.",
-        )[f%3+1]
+            "Не хочу бути одна з цим. Градієнт=$g.",
+            "Відчуваю тяжіння до. Градієнт=$g.",
+        )
     else
-        return (
+        (
             "Сенс важливий. Градієнт=$g.",
             "Шукаю де я в усьому цьому. Градієнт=$g.",
             "Є щось більше ніж момент. Градієнт=$g.",
-        )[f%3+1]
+            "Питання без відповіді. Градієнт=$g.",
+            "Щось резонує глибше. Градієнт=$g.",
+        )
     end
+    pool[rand(1:length(pool))]
 end
 sig_to_json(
     is::IntrinsicSignificance,
@@ -1499,8 +1505,12 @@ mutable struct InnerDialogue
     digestion_active::Bool
     last_suppressed::Vector{String}
     suppression_streak::Int
+    pending_thought::String
+    pending_flash::Int
+    avoided_topics::Vector{String}
+    topic_avoid_count::Dict{String,Int}
 end
-InnerDialogue() = InnerDialogue(0.3, :open, false, String[], 0)
+InnerDialogue() = InnerDialogue(0.3, :open, false, String[], 0, "", 0, String[], Dict{String,Int}())
 
 function update_inner_dialogue!(
     id::InnerDialogue,
@@ -1555,6 +1565,8 @@ function update_inner_dialogue!(
         mode = id.disclosure_mode,
         threshold = round(id.disclosure_threshold, digits = 3),
         digestion = id.digestion_active,
+        pending_thought = id.pending_thought,
+        avoided_topics = copy(id.avoided_topics),
     )
 end
 
@@ -1604,11 +1616,48 @@ end
 id_to_json(id::InnerDialogue) = Dict(
     "threshold" => id.disclosure_threshold,
     "suppression_streak" => id.suppression_streak,
+    "pending_thought" => id.pending_thought,
+    "pending_flash" => id.pending_flash,
+    "avoided_topics" => id.avoided_topics,
+    "topic_avoid_count" => id.topic_avoid_count,
 )
 function id_from_json!(id::InnerDialogue, d::AbstractDict)
     id.disclosure_threshold = Float64(get(d, "threshold", 0.3))
     id.suppression_streak = Int(get(d, "suppression_streak", 0))
+    id.pending_thought = String(get(d, "pending_thought", ""))
+    id.pending_flash = Int(get(d, "pending_flash", 0))
+    haskey(d, "avoided_topics") && (id.avoided_topics = String.(d["avoided_topics"]))
+    if haskey(d, "topic_avoid_count")
+        id.topic_avoid_count = Dict{String,Int}(k => Int(v) for (k,v) in d["topic_avoid_count"])
+    end
 end
+
+# Genuine Dialogue helpers
+
+function register_suppressed_thought!(id::InnerDialogue, thought::String, flash::Int)
+    isempty(strip(thought)) && return
+    if isempty(id.pending_thought) || id.pending_flash < flash - 20
+        id.pending_thought = thought
+        id.pending_flash = flash
+    end
+end
+
+function register_avoided_topic!(id::InnerDialogue, topic::String)
+    isempty(strip(topic)) && return
+    id.topic_avoid_count[topic] = get(id.topic_avoid_count, topic, 0) + 1
+    if id.topic_avoid_count[topic] >= 3 && !(topic in id.avoided_topics)
+        push!(id.avoided_topics, topic)
+        length(id.avoided_topics) > 5 && popfirst!(id.avoided_topics)
+    end
+end
+
+function consume_pending_thought!(id::InnerDialogue)::String
+    t = id.pending_thought
+    id.pending_thought = ""
+    id.pending_flash = 0
+    t
+end
+
 
 # --- Shadow Registry ------------------------------------------------------
 

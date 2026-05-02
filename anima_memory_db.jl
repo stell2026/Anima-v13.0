@@ -124,6 +124,17 @@ CREATE TABLE IF NOT EXISTS episodic_memory (
         db,
         "CREATE INDEX IF NOT EXISTS idx_episodic_emotion ON episodic_memory(emotion, weight DESC);",
     )
+    SQLite.execute(db, """
+CREATE TABLE IF NOT EXISTS episodic_self_links (
+    flash       INTEGER NOT NULL,
+    belief_name TEXT    NOT NULL,
+    confidence  REAL    NOT NULL DEFAULT 0.0,
+    centrality  REAL    NOT NULL DEFAULT 0.0,
+    direction   TEXT    NOT NULL DEFAULT 'neutral',
+    PRIMARY KEY (flash, belief_name)
+);
+""")
+    SQLite.execute(db, "CREATE INDEX IF NOT EXISTS idx_esl_flash ON episodic_self_links(flash DESC);")
 
     SQLite.execute(
         db,
@@ -1246,6 +1257,38 @@ function state_to_vec(
     ]
 end
 
+
+# Наративний зв'язок: епізод ↔ переконання про себе
+function memory_link_episode_to_beliefs!(mem, flash, sbg, valence, self_impact, phi, weight)
+    weight < 0.40 && return
+    isnothing(sbg) && return
+    belief_strength = clamp(weight * 0.5 + phi * 0.3 + self_impact * 0.2, 0.0, 1.0)
+    for (name, b) in sbg.beliefs
+        b.confidence < 0.3 && continue
+        direction = if valence > 0.2 && self_impact > 0.3
+            name == "I_am_unstable" ? "challenge" : "confirm"
+        elseif valence < -0.2 && self_impact > 0.3
+            name == "I_am_unstable" ? "confirm" : "challenge"
+        else
+            "neutral"
+        end
+        try
+            DBInterface.execute(mem.db,
+                "INSERT OR REPLACE INTO episodic_self_links (flash,belief_name,confidence,centrality,direction) VALUES (?,?,?,?,?)",
+                (flash, name, b.confidence, b.centrality, direction))
+        catch; end
+        delta = belief_strength * 0.025
+        if direction == "confirm"
+            b.confidence = clamp(b.confidence + delta, 0.0, 1.0)
+            b.confirmations += 1
+        elseif direction == "challenge"
+            b.confidence = clamp(b.confidence - delta * 0.6, 0.0, 1.0)
+            b.violations += 1
+            b.last_challenged_flash = flash
+        end
+    end
+end
+
 function recall_similar_states(
     mem::MemoryDB,
     query_vec::Vector{Float64};
@@ -1295,6 +1338,10 @@ function recall_similar_states(
         em = String(r.emotion)
         em ∈ seen && continue
         push!(seen, em)
+        brows = Tables.rowtable(DBInterface.execute(mem.db,
+            "SELECT belief_name,confidence,direction FROM episodic_self_links WHERE flash=? AND confidence>0.4 ORDER BY confidence DESC LIMIT 3",
+            (Int(r.flash),)))
+        self_beliefs = [(name=String(br.belief_name), conf=_fdb(br.confidence), dir=String(br.direction)) for br in brows]
         push!(
             result,
             (
@@ -1304,6 +1351,7 @@ function recall_similar_states(
                 phi = _fdb(r.phi),
                 valence = _fdb(r.valence),
                 similarity = sim,
+                self_beliefs = self_beliefs,
             ),
         )
         length(result) >= top_n && break
@@ -1316,7 +1364,13 @@ function similar_states_to_block(similar::Vector{NamedTuple})::String
     lines = String[]
     for s in similar
         tone = s.valence > 0.2 ? "тепло" : s.valence < -0.2 ? "холодно" : "нейтрально"
-        push!(lines, "[$(s.emotion), phi=$(round(s.phi,digits=2)), $tone]")
+        belief_note = if haskey(s, :self_beliefs) && !isempty(s.self_beliefs)
+            parts = [b.dir == "confirm" ? "$(b.name)↑" : b.dir == "challenge" ? "$(b.name)↓" : b.name for b in s.self_beliefs]
+            " | я: " * join(parts, ", ")
+        else
+            ""
+        end
+        push!(lines, "[$(s.emotion), phi=$(round(s.phi,digits=2)), $tone$belief_note]")
     end
     "відлуння: " * join(lines, " / ")
 end

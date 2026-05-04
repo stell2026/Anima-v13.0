@@ -256,7 +256,7 @@ Recent updates, in brief:
 
 ## ✨ What's new
 
-### φ recursive — integration now shapes the future prior
+### Ф recursive — integration now shapes the future prior
 
 Previously φ only influenced `epistemic_trust`. Now after each flash φ_posterior shifts `prior_mu` toward `posterior_mu` proportional to the integration level. High φ means the system has well-integrated the experience — the prior becomes more stable (sigma narrows). Low φ — the prior stays wide, less prone to update.
 

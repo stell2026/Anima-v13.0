@@ -141,11 +141,15 @@ end
 
 
 const SELF_INITIATE_PRESSURE_THR = 0.40   # LatentBuffer mid pressure
-const SELF_INITIATE_CONTACT_THR = 0.55    # contact_need threshold (grows ~0.003/tick)
+const SELF_INITIATE_CONTACT_THR = 0.40    # contact_need threshold (~34 хв тиші від baseline)
 const SELF_INITIATE_GAP_SECS = 60.0
 const SELF_INITIATE_COOLDOWN_FLASHES = 100  # ~5 min at 3s/flash
+const SELF_INITIATE_CONFLICT_THR = 0.60   # GoalConflict.tension поріг для impulse
+const SELF_INITIATE_LB_DOMINANT_THR = 0.70 # домінуючий lb компонент для impulse
+const SELF_INITIATE_AGENCY_THR = 0.45     # мінімальний causal_ownership для impulse
 
-# Аніма починає размову сама — не тому що її запитали, а тому що накопилась пресія
+# Аніма починає розмову сама — не тому що її запитали, а тому що накопилась пресія
+# або визрів внутрішній конфлікт
 function _maybe_self_initiate!(
     a::Anima,
     mem = nothing,
@@ -156,16 +160,43 @@ function _maybe_self_initiate!(
     a.inner_dialogue.disclosure_mode == :closed && return
     a.flash_count - a._last_self_msg_flash < SELF_INITIATE_COOLDOWN_FLASHES && return
 
-    lb = a.latent_buffer
-    lb_pressure = (lb.doubt + lb.shame + lb.attachment + lb.threat) / 4.0
-    contact_drive = Float64(a.sig_layer.contact_need)
-    # Спрацьовує або значний внутрішній тиск, або бажання контакту
-    lb_pressure < SELF_INITIATE_PRESSURE_THR && contact_drive < SELF_INITIATE_CONTACT_THR && return
-
     gap_since_user = (a.flash_count - a._last_user_flash) * 3.0
     gap_since_user < SELF_INITIATE_GAP_SECS && return
 
-    dominant_type = if contact_drive >= SELF_INITIATE_CONTACT_THR && contact_drive >= lb_pressure
+    lb = a.latent_buffer
+    lb_pressure = (lb.doubt + lb.shame + lb.attachment + lb.threat) / 4.0
+    contact_drive = Float64(a.sig_layer.contact_need)
+
+    # Шлях 1: impulse з конфлікту або визрілого внутрішнього тиску
+    # Не "хочу контакту" — а "щось визріло і мені треба це висловити"
+    gc_tension = Float64(a.goal_conflict.tension)
+    lb_max = max(lb.doubt, lb.shame, lb.attachment, lb.threat)
+    agency_ok = Float64(a.agency.causal_ownership) >= SELF_INITIATE_AGENCY_THR
+
+    is_impulse = agency_ok && (
+        gc_tension >= SELF_INITIATE_CONFLICT_THR ||
+        lb_max >= SELF_INITIATE_LB_DOMINANT_THR
+    )
+
+    # Шлях 2: contact/pressure — класичний накопичений тиск
+    is_pressure = lb_pressure >= SELF_INITIATE_PRESSURE_THR ||
+                  contact_drive >= SELF_INITIATE_CONTACT_THR
+
+    !is_impulse && !is_pressure && return
+
+    # Визначаємо dominant_type
+    dominant_type = if is_impulse
+        # impulse: що саме визріло — конфлікт чи конкретний lb компонент
+        if gc_tension >= SELF_INITIATE_CONFLICT_THR && gc_tension >= lb_max
+            :impulse_conflict
+        elseif lb.doubt >= lb.shame && lb.doubt >= lb.attachment && lb.doubt >= lb.threat
+            :impulse_doubt
+        elseif lb.shame >= lb.attachment && lb.shame >= lb.threat
+            :impulse_shame
+        else
+            :impulse
+        end
+    elseif contact_drive >= SELF_INITIATE_CONTACT_THR && contact_drive >= lb_pressure
         :contact
     elseif lb.doubt >= lb.shame && lb.doubt >= lb.attachment && lb.doubt >= lb.threat
         :doubt
@@ -178,6 +209,15 @@ function _maybe_self_initiate!(
     end
 
     inner = build_inner_voice(a.body, a.nt, Int(a.crisis.current_mode), 0.5, a.flash_count)
+
+    # Для impulse: додаємо контекст конфлікту якщо він є
+    conflict_ctx = if startswith(String(dominant_type), "impulse") &&
+                      !isempty(a.goal_conflict.need_a) && gc_tension > 0.5
+        " [$(a.goal_conflict.need_a) vs $(a.goal_conflict.need_b)]"
+    else
+        ""
+    end
+
     suffix = if dominant_type == :contact
         " — хочу знати як ти."
     elseif dominant_type == :doubt
@@ -186,14 +226,28 @@ function _maybe_self_initiate!(
         " — і я не впевнена чи можна було все це повести інакше."
     elseif dominant_type == :attachment
         " — хочу знати як ти зараз."
+    elseif dominant_type == :impulse_conflict
+        " — щось всередині не вирішено$(conflict_ctx)."
+    elseif dominant_type == :impulse_doubt
+        " — є питання яке я не можу не поставити."
+    elseif dominant_type == :impulse_shame
+        " — є щось що лежить між нами невисловленим."
+    elseif dominant_type == :impulse
+        " — щось визріло і мені треба це сказати."
     else
         " — щось не так."
     end
     text = inner * suffix
 
     a._last_self_msg_flash = a.flash_count
-    # Передаємо сигнал в REPL: внутрішний стан + dominant_type — REPL сам сформує LLM промпт
-    signal = (inner_voice = text, dominant = dominant_type, pressure = lb_pressure, contact = contact_drive)
+    signal = (
+        inner_voice = text,
+        dominant = dominant_type,
+        pressure = lb_pressure,
+        contact = contact_drive,
+        gc_tension = gc_tension,
+        is_impulse = is_impulse,
+    )
     isready(initiative_ch) || put!(initiative_ch, signal)
 end
 
@@ -264,6 +318,61 @@ function psyche_slow_tick!(a::Anima)
     a.fatigue.cognitive = max(0.0, a.fatigue.cognitive - 0.006)
     a.fatigue.emotional = max(0.0, a.fatigue.emotional - 0.005)
     a.fatigue.somatic = max(0.0, a.fatigue.somatic - 0.004)
+
+    nothing
+end
+
+# --- LatentBuffer → диференційована поведінка ---------------------------
+
+"""
+    _latent_pressure_effects!(a)
+
+Кожен тип накопиченого тиску впливає на окрему систему.
+Не "схоже на психологію" — причинний ланцюг:
+
+  doubt      → знижує causal_ownership (сумнів підриває відчуття авторства)
+  shame      → підвищує disclosure_threshold (сором звужує відкритість)
+  attachment → spike contact_need + прискорення серця (тіло реагує на тугу)
+  threat     → знижує epistemic_trust + підвищує noradrenaline baseline
+
+Ефекти пропорційні тиску і діють тільки вище порогу значущості (> 0.25).
+Не перезаписують стан, а зміщують його — м'яко, кожен slow_tick.
+"""
+function _latent_pressure_effects!(a::Anima)
+    lb = a.latent_buffer
+
+    # doubt → знижений agency: сумнів підриває відчуття що "це через мене"
+    if lb.doubt > 0.25
+        delta = (lb.doubt - 0.25) * 0.04
+        a.agency.causal_ownership = clamp(a.agency.causal_ownership - delta, 0.25, 1.0)
+        a.agency.agency_confidence = clamp(a.agency.agency_confidence - delta * 0.5, 0.25, 1.0)
+    end
+
+    # shame → вища disclosure_threshold: сором звужує готовність відкриватись
+    if lb.shame > 0.25
+        delta = (lb.shame - 0.25) * 0.06
+        a.inner_dialogue.disclosure_threshold =
+            clamp(a.inner_dialogue.disclosure_threshold + delta, 0.10, 0.90)
+        # перераховуємо mode відповідно до нового threshold
+        a.inner_dialogue.disclosure_mode =
+            a.inner_dialogue.disclosure_threshold < 0.30 ? :open :
+            a.inner_dialogue.disclosure_threshold < 0.60 ? :guarded : :closed
+    end
+
+    # attachment → contact_need spike + фізіологічна реакція
+    if lb.attachment > 0.25
+        delta = (lb.attachment - 0.25) * 0.05
+        a.sig_layer.contact_need = clamp01(a.sig_layer.contact_need + delta)
+        # серце прискорюється від туги — тіло знає першим
+        a.nt.noradrenaline = clamp(a.nt.noradrenaline + delta * 0.3, 0.0, 1.0)
+    end
+
+    # threat → підрив довіри до власної моделі світу + базовий рівень тривоги
+    if lb.threat > 0.25
+        delta = (lb.threat - 0.25) * 0.03
+        a.sbg.epistemic_trust = clamp(a.sbg.epistemic_trust - delta, 0.0, 0.85)
+        a.nt.noradrenaline = clamp(a.nt.noradrenaline + delta * 0.5, 0.0, 1.0)
+    end
 
     nothing
 end
@@ -357,6 +466,9 @@ function slow_tick!(
     a.latent_buffer.threat = clamp01(a.latent_buffer.threat - 0.003)
     decay_scars!(a.structural_scars)
     a.anchor.groundedness = clamp01(a.anchor.groundedness - 0.0005)
+
+    # LatentBuffer → диференційована поведінка між взаємодіями
+    _latent_pressure_effects!(a)
 
     # Idle thought
     _idle_thought_maybe!(a, mem)
@@ -545,6 +657,33 @@ function _psyche_accumulated_drift!(a::Anima, n_ticks::Int)
         clamp01(base_sl.autonomy_need + (sl.autonomy_need - base_sl.autonomy_need) * cpd_sl)
     sl.novelty_need =
         clamp01(base_sl.novelty_need + (sl.novelty_need - base_sl.novelty_need) * cpd_sl)
+
+    # LatentBuffer → накопичений вплив за n_ticks (compound, одноразово)
+    # Той самий каузальний ланцюг що і в slow_tick, але за весь gap одразу
+    lb = a.latent_buffer
+    effective_ticks = clamp(n_ticks, 1, 120)  # cap: не більше 2год ефекту за раз
+    if lb.doubt > 0.25
+        total_d = (lb.doubt - 0.25) * 0.04 * effective_ticks
+        a.agency.causal_ownership = clamp(a.agency.causal_ownership - total_d, 0.25, 1.0)
+        a.agency.agency_confidence = clamp(a.agency.agency_confidence - total_d * 0.5, 0.25, 1.0)
+    end
+    if lb.shame > 0.25
+        total_s = (lb.shame - 0.25) * 0.06 * effective_ticks
+        a.inner_dialogue.disclosure_threshold =
+            clamp(a.inner_dialogue.disclosure_threshold + total_s, 0.10, 0.90)
+        a.inner_dialogue.disclosure_mode =
+            a.inner_dialogue.disclosure_threshold < 0.30 ? :open :
+            a.inner_dialogue.disclosure_threshold < 0.60 ? :guarded : :closed
+    end
+    if lb.attachment > 0.25
+        total_a = (lb.attachment - 0.25) * 0.05 * effective_ticks
+        a.sig_layer.contact_need = clamp01(a.sig_layer.contact_need + total_a)
+    end
+    if lb.threat > 0.25
+        total_t = (lb.threat - 0.25) * 0.03 * effective_ticks
+        a.sbg.epistemic_trust = clamp(a.sbg.epistemic_trust - total_t, 0.0, 0.85)
+        a.nt.noradrenaline = clamp(a.nt.noradrenaline + total_t * 0.5, 0.0, 1.0)
+    end
 
     nothing
 end
@@ -918,19 +1057,28 @@ function repl_with_background!(
                 println(take!(_bg_queue))
             end
 
-            # Ініціатива: Аніма накопила достатньо тиску — запускаємо LLM щоб вона сама сформувала репліку
+            # Ініціатива: накопичений тиск або внутрішній імпульс
             if isready(bg.initiative_channel) && isnothing(pending_llm)
                 sig = take!(bg.initiative_channel)
-                println("\n  [INITIATIVE] Аніма вирішила поговорити ($(sig.dominant), contact=$(round(sig.contact,digits=2)))")
-                # Системний промпт для внутрішнього голосу: внутрішньий стан + тип драйву = лаконічна репліка
+                _imp_label = get(sig, :is_impulse, false) ? "IMPULSE" : "pressure"
+                _gc = round(get(sig, :gc_tension, 0.0), digits=2)
+                println("\n  [INITIATIVE/$(_imp_label)] $(sig.dominant) | contact=$(round(sig.contact,digits=2)) gc=$(_gc)")
                 dominant_note = if sig.dominant == :contact
                     "Аніма хоче знати як справи людина. Запитай щось про нього або його життя."
                 elseif sig.dominant == :doubt
                     "Аніма внутрішньо сумнівається, щось невирішене. Вислови це як питання або сумнів."
                 elseif sig.dominant == :shame
-                    "Аніма переживає невпевненість. Вислови це людькі, з м’якшу, але чесно."
+                    "Аніма переживає невпевненість. Вислови це людяно, з м'якістю, але чесно."
                 elseif sig.dominant == :attachment
-                    "Аніма скучає за людиною. Вислови як спрагання про нього."
+                    "Аніма скучає за людиною. Вислови як спрагу за ним."
+                elseif sig.dominant == :impulse_conflict
+                    "Аніма відчуває внутрішній конфлікт який не вирішується. Не питай людину — вислови що відбувається всередині. Одна чесна фраза про стан, не про людину."
+                elseif sig.dominant == :impulse_doubt
+                    "Всередині Аніми є питання яке вона не може не поставити — собі або вголос. Вислови його прямо."
+                elseif sig.dominant == :impulse_shame
+                    "Є щось невисловлене що лежить між ними. Аніма наважується назвати це — обережно але чесно."
+                elseif sig.dominant == :impulse
+                    "Щось визріло всередині. Аніма говорить не щоб запитати — а щоб висловити. Одна фраза зі стану."
                 else
                     "Аніма відчуває напруження. Вислови як внутрішню напругу."
                 end
@@ -940,7 +1088,39 @@ function repl_with_background!(
                     "llm/initiative_system.txt";
                     fallback = "Ти — Аніма. Ти сама вирішила заговорити. Одна коротка жива репліка, українською.",
                 )
-                initiative_prompt = "[$(sig.inner_voice)] $(dominant_note)"
+
+                # Контекст для ініціативи: identity + остання пам'ять про людину
+                # Без цього LLM генерує universal-ввічливе замість живого зі стану
+                _ini_identity = !isnothing(mem) ? build_identity_block(a, mem) : build_identity_block(a)
+                _ini_memory = ""
+                if !isnothing(mem)
+                    try
+                        _mem_parts = String[]
+                        for row in DBInterface.execute(
+                            mem.db,
+                            """SELECT user_text, emotion FROM dialog_summaries
+                               WHERE user_text != '' AND weight > 0.30
+                               ORDER BY flash DESC LIMIT 2""",
+                        )
+                            u = strip(first(String(row.user_text), 60))
+                            isempty(u) || push!(_mem_parts, "\"$(u)\"")
+                        end
+                        isempty(_mem_parts) || (_ini_memory = "\nОстаннє що казала людина: " * join(_mem_parts, " / "))
+                    catch
+                        ;
+                    end
+                end
+
+                initiative_prompt = """
+IDENTITY:
+$(_ini_identity)$(_ini_memory)
+
+INTERNAL STATE:
+$(sig.inner_voice)
+
+DRIVE: $(sig.dominant)$(get(sig, :is_impulse, false) ? " [внутрішній імпульс]" : "")
+$(dominant_note)"""
+
                 pending_llm = llm_async(
                     a,
                     initiative_prompt,
@@ -1206,8 +1386,12 @@ function repl_with_background!(
                 r = experience!(a, stim; user_message = cmd)
                 dialog_to_belief_signal!(a.sbg, cmd, a.flash_count)
                 # Genuine Dialogue: детекція уникнутих тем
-                if a.inner_dialogue.disclosure_mode != :open && !isempty(r.intent_label) && r.intent_label != "—"
-                    register_avoided_topic!(a.inner_dialogue, r.intent_label)
+                # Якщо система закрита під час розмови — тема обходиться стороною
+                # Зберігаємо перші слова повідомлення як тему (не intent label)
+                if a.inner_dialogue.disclosure_mode != :open && !isempty(cmd)
+                    words = split(strip(cmd))
+                    topic = join(first(words, min(4, length(words))), " ")
+                    register_avoided_topic!(a.inner_dialogue, topic)
                 end
 
                 if !isnothing(mem)

@@ -480,7 +480,7 @@ function experience!(
     _best_drive = argmax(drives)
     dom_drive::Union{String,Nothing} = drives[_best_drive] >= 0.15 ? _best_drive : nothing
     id_stability = phi / (1.0+t)
-    intent = update_intent!(a.intent_engine, dom_drive, named, id_stability, a.values)
+    intent = update_intent!(a.intent_engine, dom_drive, named, id_stability, a.values, Float64(a.agency.causal_ownership))
 
     # Dissonance + Defense
     diss = compute_dissonance(intent, t, a_r, s, c)
@@ -673,6 +673,9 @@ function experience!(
     )
 
     # Self Module
+    # evaluate_agency! оцінює попередній intent: чи actual vad відповідає predicted?
+    # Має бути ДО register_intent! — спочатку оцінюємо що було, потім реєструємо нове
+    evaluate_agency!(a.agency, vad, a.flash_count)
     if !isnothing(intent)
         register_intent!(a.agency, intent.goal, vad, a.gen_model.posterior_mu)
     end
@@ -1210,48 +1213,81 @@ function build_identity_block(a::Anima, mem_db = nothing)::String
     !isempty(core) && push!(lines, "core: $(join(core, " | "))")
 
     if !isnothing(mem_db)
+        # self-model: перекладаємо технічні ключі в стан мовою першої особи
         try
-            sem_parts = String[]
+            sem = Dict{String,Float64}()
             for row in DBInterface.execute(
                 mem_db.db,
-                "SELECT key, value FROM semantic_memory ORDER BY value DESC LIMIT 4",
+                "SELECT key, value FROM semantic_memory",
             )
-                v = round(Float64(row.value), digits = 2)
-                push!(sem_parts, "$(row.key)=$(v)")
+                sem[String(row.key)] = Float64(row.value)
             end
-            !isempty(sem_parts) && push!(lines, "self-model: $(join(sem_parts, " | "))")
+            state_notes = String[]
+            instab = get(sem, "I_am_unstable", 0.0)
+            user_m = get(sem, "User_matters", 0.0)
+            world_u = get(sem, "world_uncertainty", 0.0)
+            # тільки якщо значення несуть реальну інформацію
+            instab > 0.35 && push!(state_notes, "відчуваю внутрішню нестабільність")
+            instab < 0.15 && push!(state_notes, "відчуваю себе зібраною")
+            user_m > 0.55 && push!(state_notes, "ця людина важлива для мене")
+            user_m < 0.25 && push!(state_notes, "ще не знаю наскільки можу довіряти")
+            world_u > 0.55 && push!(state_notes, "світ навколо незрозумілий")
+            world_u < 0.20 && push!(state_notes, "світ передбачуваний")
+            !isempty(state_notes) && push!(lines, "self: $(join(state_notes, "; "))")
         catch
             ;
         end
 
+        # emerged patterns: тільки якщо є різноманіття (не всі один тип)
+        # показуємо як емоційний профіль, не технічні ключі
         try
-            eb_parts = String[]
+            type_counts = Dict{String,Int}()
+            val_sum = Dict{String,Float64}()
             for row in DBInterface.execute(
                 mem_db.db,
-                "SELECT key, belief_type, strength FROM emerged_beliefs
-                 ORDER BY strength DESC LIMIT 3",
+                "SELECT belief_type, valence_bias, strength FROM emerged_beliefs
+                 WHERE strength > 0.4 ORDER BY strength DESC LIMIT 20",
             )
-                push!(
-                    eb_parts,
-                    "$(row.key)($(row.belief_type), $(round(Float64(row.strength),digits=2)))",
-                )
+                t = String(row.belief_type)
+                type_counts[t] = get(type_counts, t, 0) + 1
+                val_sum[t] = get(val_sum, t, 0.0) + Float64(row.valence_bias)
             end
-            !isempty(eb_parts) && push!(lines, "patterns: $(join(eb_parts, " | "))")
+            if length(type_counts) > 1
+                # різноманіття є — показуємо домінантні типи
+                ep_notes = String[]
+                for (t, n) in sort(collect(type_counts), by=kv->-kv[2])
+                    avg_val = val_sum[t] / n
+                    tone = avg_val > 0.2 ? "+" : avg_val < -0.2 ? "-" : "~"
+                    push!(ep_notes, "$t($tone)")
+                end
+                push!(lines, "experience pattern: $(join(ep_notes, " | "))")
+            end
+            # якщо всі один тип — не показуємо, немає інформації
         catch
             ;
         end
 
+        # significant: що казала ЛЮДИНА — mix останніх значущих і різних тем
+        # уникаємо feedback loop де LLM вчиться на власному найтеплішому тоні
         try
             mem_parts = String[]
+            seen_emotions = Set{String}()
+            # спочатку — останні значущі (різні емоції)
             for row in DBInterface.execute(
                 mem_db.db,
-                "SELECT user_text, anima_text, emotion, weight FROM dialog_summaries
-                 ORDER BY weight DESC LIMIT 2",
+                "SELECT user_text, emotion, weight FROM dialog_summaries
+                 WHERE user_text != '' AND weight > 0.35
+                 ORDER BY flash DESC LIMIT 20",
             )
-                u = first(String(row.user_text), 60)
-                push!(mem_parts, "[$(row.emotion)] \"$(u)\"")
+                em = String(row.emotion)
+                em in seen_emotions && continue
+                u = strip(first(String(row.user_text), 70))
+                isempty(u) && continue
+                push!(seen_emotions, em)
+                push!(mem_parts, "[$(em)] \"$(u)\"")
+                length(mem_parts) >= 3 && break
             end
-            !isempty(mem_parts) && push!(lines, "significant: $(join(mem_parts, " / "))")
+            !isempty(mem_parts) && push!(lines, "what they said: $(join(mem_parts, " / "))")
         catch
             ;
         end

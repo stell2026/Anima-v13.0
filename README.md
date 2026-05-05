@@ -336,7 +336,6 @@ julia --version
 ```bash
 git clone https://github.com/stell2026/Anima.git
 cd Anima/Anima
-julia run_anima.jl
 ```
 
 ### 3. Install Julia dependencies

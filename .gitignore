@@ -1,13 +1,31 @@
-# база пам'яті
-*.db
-memory/
-
-# збережений стан
+# Стан Аніми, що генерується автоматично
 anima_core.json
 anima_psyche.json
+anima_self.json
+anima_latent.json
+anima_dialog.json
+anima_dream.json
 
-# логи
+# Локальна база пам'яті
+memory/anima.db
+
+# Змінні оточення (тут можуть бути твої токени)
+.env
+
+# Системні файли macOS
+.DS_Store
+
+# Системні файли Windows
+Thumbs.db
+
+# Файли редакторів
+.vscode/
+.idea/
+
+# Логи
 *.log
 
-# Julia артефакти
-.julia/
+# Тимчасові файли Julia
+*.jl.cov
+*.jl.*.cov
+*.jl.mem

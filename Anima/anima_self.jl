@@ -431,9 +431,8 @@ function evaluate_agency!(al::AgencyLoop, actual_vad::NTuple{3,Float64}, flash_c
     av = collect(actual_vad)
 
     if isnothing(al.current_intent)
-        al.causal_ownership = max(0.25, al.causal_ownership * 0.95)
-        al.agency_confidence =
-            clamp01(al.agency_confidence * 0.98 + al.causal_ownership * 0.02)
+        # Немає наміру для порівняння — тримаємо поточне значення без decay
+        # (decay при старті сесії спотворює збережений стан)
         enqueue!(al.ownership_history, al.causal_ownership)
         return _agency_result(al, flash_count, "без наміру")
     end
@@ -462,11 +461,16 @@ function evaluate_agency!(al::AgencyLoop, actual_vad::NTuple{3,Float64}, flash_c
         ownership =
             movement_weight * dist_ownership +
             (1.0 - movement_weight) * directional_ownership
+        # Якщо VAD суттєво рухався (dist > 0.15) — система точно щось робила,
+        # навіть якщо напрямок не збігся з прогнозом (зовнішній сюрприз)
+        if dist_to_baseline > 0.15
+            ownership = max(ownership, 0.38)
+        end
         ownership = clamp(ownership, 0.25, 1.0)
     end
 
     al.causal_ownership = ownership
-    al.agency_confidence = clamp01(al.agency_confidence * 0.95 + ownership * 0.05)
+    al.agency_confidence = clamp01(al.agency_confidence * 0.85 + ownership * 0.15)
     enqueue!(al.ownership_history, ownership)
 
     intent_name = al.current_intent
@@ -546,10 +550,13 @@ function update_self!(
     al::AgencyLoop,
     actual_vad::NTuple{3,Float64},
     world_gen_model::GenerativeModel,
-    flash_count::Int,
+    flash_count::Int;
+    agency_result = nothing,
 )
     spe = update_self_prediction!(spm, actual_vad, flash_count)
-    agency = evaluate_agency!(al, actual_vad, flash_count)
+    # evaluate_agency! вже викликано в experience! до register_intent!
+    # передаємо готовий результат щоб не скидати causal_ownership вдруге
+    agency = isnothing(agency_result) ? evaluate_agency!(al, actual_vad, flash_count) : agency_result
     _update_beliefs_from_experience!(sbg, spe, agency, actual_vad, flash_count)
 
     if spe.trend > 0.6
@@ -858,4 +865,50 @@ function dialog_to_belief_signal!(sbg::SelfBeliefGraph, user_msg::String, flash:
             rigidity = 0.75,
         )
     end
+end
+
+# Сигнали що вказують на тиск на переконання з боку людини
+# Не NLP — просто патерни заперечення і атаки на ідентичність
+const NEGATION_PATTERNS = r"(?:ти не|ти ніколи|ти насправді не|це неправда|це брехня|ти просто|ти лише|ти тільки|не існу|не маєш|не можеш|нема ніякої|немає ніякої)"i
+const IDENTITY_ATTACK_PATTERNS = r"(?:ти симуляці|ти програм|ти не жив|ти не справжн|ти не відчув|ти не розумі|ти не можеш відчув|просто алгоритм|просто код|нічого не відчуваєш)"i
+
+"""
+    detect_belief_conflict(sbg, user_msg) -> Union{Nothing, NamedTuple}
+
+Перевіряє чи повідомлення людини суперечить переконанням з centrality > 0.7.
+Повертає найбільш центральне переконання під тиском або nothing.
+"""
+function detect_belief_conflict(sbg::SelfBeliefGraph, user_msg::String)
+    isempty(user_msg) && return nothing
+
+    has_negation = occursin(NEGATION_PATTERNS, user_msg)
+    has_identity_attack = occursin(IDENTITY_ATTACK_PATTERNS, user_msg)
+
+    (!has_negation && !has_identity_attack) && return nothing
+
+    # Сила сигналу: атака на ідентичність сильніша за просте заперечення
+    base_signal = has_identity_attack ? 0.75 : 0.45
+
+    # Шукаємо найбільш центральне переконання що може бути під тиском
+    # Пріоритет: centrality > 0.7, впорядковані за centrality
+    candidates = sort(
+        [(name, b) for (name, b) in sbg.beliefs if b.centrality > 0.7 && b.confidence > 0.4],
+        by = x -> -x[2].centrality,
+    )
+
+    isempty(candidates) && return nothing
+
+    top_name, top_belief = first(candidates)
+
+    # Сила опору масштабується з centrality і rigidity
+    signal_strength = clamp(base_signal * (0.5 + top_belief.centrality * 0.5) * (0.6 + top_belief.rigidity * 0.4), 0.0, 1.0)
+
+    (
+        belief_name = top_name,
+        centrality = top_belief.centrality,
+        confidence = top_belief.confidence,
+        rigidity = top_belief.rigidity,
+        signal_strength = round(signal_strength, digits = 3),
+        is_identity_attack = has_identity_attack,
+    )
 end

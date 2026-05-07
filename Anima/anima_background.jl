@@ -176,14 +176,16 @@ function _maybe_self_initiate!(
     lb_max = max(lb.doubt, lb.shame, lb.attachment, lb.threat)
     agency_ok = Float64(a.agency.causal_ownership) >= SELF_INITIATE_AGENCY_THR
 
-    is_impulse = agency_ok && (
-        gc_tension >= SELF_INITIATE_CONFLICT_THR ||
-        lb_max >= SELF_INITIATE_LB_DOMINANT_THR
-    )
+    is_impulse =
+        agency_ok && (
+            gc_tension >= SELF_INITIATE_CONFLICT_THR ||
+            lb_max >= SELF_INITIATE_LB_DOMINANT_THR
+        )
 
     # Шлях 2: contact/pressure — класичний накопичений тиск
-    is_pressure = lb_pressure >= SELF_INITIATE_PRESSURE_THR ||
-                  contact_drive >= SELF_INITIATE_CONTACT_THR
+    is_pressure =
+        lb_pressure >= SELF_INITIATE_PRESSURE_THR ||
+        contact_drive >= SELF_INITIATE_CONTACT_THR
 
     # Шлях 3: ендогенний VFE-тиск — когнітивний голод без зовнішнього стимулу
     # Умова: потреба в новизні критична + достатньо часу без нової інформації
@@ -227,12 +229,14 @@ function _maybe_self_initiate!(
     inner = build_inner_voice(a.body, a.nt, Int(a.crisis.current_mode), 0.5, a.flash_count)
 
     # Для impulse: додаємо контекст конфлікту якщо він є
-    conflict_ctx = if startswith(String(dominant_type), "impulse") &&
-                      !isempty(a.goal_conflict.need_a) && gc_tension > 0.5
-        " [$(a.goal_conflict.need_a) vs $(a.goal_conflict.need_b)]"
-    else
-        ""
-    end
+    conflict_ctx =
+        if startswith(String(dominant_type), "impulse") &&
+           !isempty(a.goal_conflict.need_a) &&
+           gc_tension > 0.5
+            " [$(a.goal_conflict.need_a) vs $(a.goal_conflict.need_b)]"
+        else
+            ""
+        end
 
     suffix = if dominant_type == :contact
         " — хочу знати як ти."
@@ -384,7 +388,8 @@ function _latent_pressure_effects!(a::Anima)
     if lb.doubt > 0.25
         delta = (lb.doubt - 0.25) * 0.04
         a.agency.causal_ownership = clamp(a.agency.causal_ownership - delta, 0.25, 1.0)
-        a.agency.agency_confidence = clamp(a.agency.agency_confidence - delta * 0.5, 0.25, 1.0)
+        a.agency.agency_confidence =
+            clamp(a.agency.agency_confidence - delta * 0.5, 0.25, 1.0)
     end
 
     # shame → вища disclosure_threshold: сором звужує готовність відкриватись
@@ -531,7 +536,13 @@ function slow_tick!(
                 a.temporal.gap_seconds +
                 Float64(Dates.value(now() - unix2datetime(a.temporal.session_start))) /
                 1000.0
-            dream_rec = dream_flash!(a, mem, dialog_history, gap_now; shadow_registry = a.shadow_registry)
+            dream_rec = dream_flash!(
+                a,
+                mem,
+                dialog_history,
+                gap_now;
+                shadow_registry = a.shadow_registry,
+            )
             if !isnothing(dream_rec)
                 save_dream!(dream_rec)
                 @info "[DREAM] $(dream_rec.narrative)"
@@ -719,7 +730,8 @@ function _psyche_accumulated_drift!(a::Anima, n_ticks::Int)
     if lb.doubt > 0.25
         total_d = (lb.doubt - 0.25) * 0.04 * effective_ticks
         a.agency.causal_ownership = clamp(a.agency.causal_ownership - total_d, 0.25, 1.0)
-        a.agency.agency_confidence = clamp(a.agency.agency_confidence - total_d * 0.5, 0.25, 1.0)
+        a.agency.agency_confidence =
+            clamp(a.agency.agency_confidence - total_d * 0.5, 0.25, 1.0)
     end
     if lb.shame > 0.25
         total_s = (lb.shame - 0.25) * 0.06 * effective_ticks
@@ -988,17 +1000,24 @@ function repl_with_background!(
 
     let gap = a.temporal.gap_seconds
         if gap > 0.0
-            mem_unc = !isnothing(mem) ? Float64(get(mem._affect_cache, "memory_uncertainty", 0.3)) : 0.3
+            mem_unc =
+                !isnothing(mem) ?
+                Float64(get(mem._affect_cache, "memory_uncertainty", 0.3)) : 0.3
             subjective_gap = gap * (1.0 + mem_unc * 0.5)
 
             if subjective_gap > 3600.0
                 disorientation = clamp((subjective_gap - 3600.0) / 86400.0, 0.0, 0.4)
-                a.nt.noradrenaline = clamp(a.nt.noradrenaline + disorientation * 0.25, 0.0, 1.0)
-                a.sbg.epistemic_trust = clamp(a.sbg.epistemic_trust - disorientation * 0.15, 0.0, 1.0)
-                disorientation > 0.1 && println("  [TEMPORAL] Субєктивний час: $(round(subjective_gap/3600, digits=1))год. Дезорієнтація=$(round(disorientation,digits=2)).")
+                a.nt.noradrenaline =
+                    clamp(a.nt.noradrenaline + disorientation * 0.25, 0.0, 1.0)
+                a.sbg.epistemic_trust =
+                    clamp(a.sbg.epistemic_trust - disorientation * 0.15, 0.0, 1.0)
+                disorientation > 0.1 && println(
+                    "  [TEMPORAL] Субєктивний час: $(round(subjective_gap/3600, digits=1))год. Дезорієнтація=$(round(disorientation,digits=2)).",
+                )
             elseif subjective_gap < 600.0 && gap > 10.0
                 continuity = clamp((600.0 - subjective_gap) / 600.0, 0.0, 0.3)
-                a.sbg.epistemic_trust = clamp(a.sbg.epistemic_trust + continuity * 0.08, 0.0, 1.0)
+                a.sbg.epistemic_trust =
+                    clamp(a.sbg.epistemic_trust + continuity * 0.08, 0.0, 1.0)
                 a.nt.serotonin = clamp(a.nt.serotonin + continuity * 0.05, 0.0, 1.0)
             end
         end
@@ -1058,8 +1077,10 @@ function repl_with_background!(
                     # Аніма чує власні слова — не аналіз, а переживання
                     self_hear!(a, llm_reply)
                     # Genuine Dialogue: пендинг висловлено — очищаємо
-                    !isempty(a.inner_dialogue.pending_thought) && consume_pending_thought!(a.inner_dialogue)
-                    !pending_is_initiative && dialog_push!(history, dialog_path, "user", pending_user_msg)
+                    !isempty(a.inner_dialogue.pending_thought) &&
+                        consume_pending_thought!(a.inner_dialogue)
+                    !pending_is_initiative &&
+                        dialog_push!(history, dialog_path, "user", pending_user_msg)
                     dialog_push!(history, dialog_path, "assistant", llm_reply)
                     bg.dialog_history[] = history
                     if !isnothing(bg.mem)
@@ -1123,13 +1144,15 @@ function repl_with_background!(
                 else
                     "pressure"
                 end
-                _gc = round(get(sig, :gc_tension, 0.0), digits=2)
-                println("\n  [INITIATIVE/$(_imp_label)] $(sig.dominant) | contact=$(round(sig.contact,digits=2)) gc=$(_gc)")
+                _gc = round(get(sig, :gc_tension, 0.0), digits = 2)
+                println(
+                    "\n  [INITIATIVE/$(_imp_label)] $(sig.dominant) | contact=$(round(sig.contact,digits=2)) gc=$(_gc)",
+                )
                 dominant_note = if sig.dominant == :contact
                     "Аніма хоче знати як справи людина. Запитай щось про нього або його життя."
                 elseif sig.dominant == :resistance
-        "Аніма повертається до невирішеного протиріччя. Не атакує — але і не відступає. Одна фраза що утримує позицію: тихо, але чітко."
-    elseif sig.dominant == :novelty_hunger
+                    "Аніма повертається до невирішеного протиріччя. Не атакує — але і не відступає. Одна фраза що утримує позицію: тихо, але чітко."
+                elseif sig.dominant == :novelty_hunger
                     "Аніма відчуває когнітивний голод — їй потрібна нова інформація, ідея або питання. Не про людину — про щось що цікаво їй самій зараз. Конкретно: явище, питання, здогад. Не загально."
                 elseif sig.dominant == :doubt
                     "Аніма внутрішньо сумнівається, щось невирішене. Вислови це як питання або сумнів."
@@ -1157,7 +1180,8 @@ function repl_with_background!(
 
                 # Контекст для ініціативи: identity + остання пам'ять про людину
                 # Без цього LLM генерує universal-ввічливе замість живого зі стану
-                _ini_identity = !isnothing(mem) ? build_identity_block(a, mem) : build_identity_block(a)
+                _ini_identity =
+                    !isnothing(mem) ? build_identity_block(a, mem) : build_identity_block(a)
                 _ini_memory = ""
                 if !isnothing(mem)
                     try
@@ -1171,7 +1195,10 @@ function repl_with_background!(
                             u = strip(first(String(row.user_text), 60))
                             isempty(u) || push!(_mem_parts, "\"$(u)\"")
                         end
-                        isempty(_mem_parts) || (_ini_memory = "\nОстаннє що казала людина: " * join(_mem_parts, " / "))
+                        isempty(_mem_parts) || (
+                            _ini_memory =
+                                "\nОстаннє що казала людина: " * join(_mem_parts, " / ")
+                        )
                     catch
                         ;
                     end
@@ -1270,7 +1297,8 @@ $(dominant_note)"""
                             flash = a.flash_count,
                         )
                     catch e
-                        ; @warn "[MEM] close: $e";
+                        ;
+                        @warn "[MEM] close: $e";
                     end
                 end
                 save!(a; verbose = true)
@@ -1411,7 +1439,8 @@ $(dominant_note)"""
                             stim[k] = clamp(get(stim, k, 0.0) + v, -1.0, 1.0)
                         end
                     catch e
-                        ; @warn "[MEM] stimulus bias: $e";
+                        ;
+                        @warn "[MEM] stimulus bias: $e";
                     end
                 end
 
@@ -1427,7 +1456,8 @@ $(dominant_note)"""
                             chronified_affect = a.chronified,
                         )
                     catch e
-                        ; @warn "[SUBJ] predict: $e";
+                        ;
+                        @warn "[SUBJ] predict: $e";
                     end
                 end
 
@@ -1444,7 +1474,8 @@ $(dominant_note)"""
                             stim[k] = clamp(v, -1.0, 1.0)
                         end
                     catch e
-                        ; @warn "[SUBJ] interpret: $e";
+                        ;
+                        @warn "[SUBJ] interpret: $e";
                     end
                 end
 
@@ -1479,12 +1510,23 @@ $(dominant_note)"""
                         # Наративний звязок: епізод ↔ переконання про себе
                         try
                             memory_link_episode_to_beliefs!(
-                                mem, a.flash_count, a.sbg,
+                                mem,
+                                a.flash_count,
+                                a.sbg,
                                 Float64(r.vad[1]),
-                                _self_impact, r.phi,
-                                clamp(r.phi * 0.6 + r.pred_error * 0.2 + abs(Float64(r.vad[1])) * 0.2, 0.0, 1.0),
+                                _self_impact,
+                                r.phi,
+                                clamp(
+                                    r.phi * 0.6 +
+                                    r.pred_error * 0.2 +
+                                    abs(Float64(r.vad[1])) * 0.2,
+                                    0.0,
+                                    1.0,
+                                ),
                             )
-                        catch e; @warn "[MEM] link: $e"; end
+                        catch e
+                            ; @warn "[MEM] link: $e";
+                        end
                         try
                             phenotype_update!(
                                 mem,
@@ -1498,10 +1540,12 @@ $(dominant_note)"""
                                 Float64(r.vad[1]),
                             )
                         catch e
-                            ; @warn "[PHENO] update: $e";
+                            ;
+                            @warn "[PHENO] update: $e";
                         end
                     catch e
-                        ; @warn "[MEM] write event: $e";
+                        ;
+                        @warn "[MEM] write event: $e";
                     end
                 end
 
@@ -1517,7 +1561,8 @@ $(dominant_note)"""
                             r.primary_raw,
                         )
                     catch e
-                        ; @warn "[SUBJ] outcome: $e";
+                        ;
+                        @warn "[SUBJ] outcome: $e";
                     end
                 end
 

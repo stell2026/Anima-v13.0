@@ -441,7 +441,8 @@ function prevent_prior_collapse!(gm::GenerativeModel)
     drift = norm(gm.prior_mu .- gm.posterior_mu)
     if drift < 0.08
         pull_strength = clamp(0.08 * (1.0 - gm.last_session_phi), 0.01, 0.08)
-        gm.prior_mu = gm.prior_mu .* (1.0 - pull_strength) .+ gm.preferred_vad .* pull_strength
+        gm.prior_mu =
+            gm.prior_mu .* (1.0 - pull_strength) .+ gm.preferred_vad .* pull_strength
     end
 end
 
@@ -735,7 +736,8 @@ function update_anchor!(
     ea.continuity = clamp01(gap_decay*0.6 + phi*0.3 + 0.1)
     # session_uncertainty: зростає з gap, ніколи не скидається до 0
     gap_uncert = 1.0 - gap_decay
-    ea.session_uncertainty = clamp(ea.session_uncertainty * 0.85 + gap_uncert * 0.15, 0.05, 0.95)
+    ea.session_uncertainty =
+        clamp(ea.session_uncertainty * 0.85 + gap_uncert * 0.15, 0.05, 0.95)
     somatic_ground = gut_feeling * 0.5 + hrv * 0.3 + phi * 0.2
     flash_credit = clamp(flash_count / 80.0, 0.0, 0.5)
     gap_penalty = (1.0 - gap_decay) * 0.08

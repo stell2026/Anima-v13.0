@@ -1290,7 +1290,7 @@ function update_intent!(
         # При agency < 0.30: повне відступлення — "спостерігати", "дочекатись"
         if agency_ownership < 0.30
             passive_goals = ("спостерігати", "дочекатись", "побути з цим")
-            goal = passive_goals[abs(hash(emotion * dom_drive)) % length(passive_goals) + 1]
+            goal = passive_goals[abs(hash(emotion*dom_drive))%length(passive_goals)+1]
             origin = "agency_low"
         elseif agency_ownership < 0.40
             # м'яке зміщення: якщо goal активний — замінюємо на менш ініціативний варіант
@@ -1304,11 +1304,13 @@ function update_intent!(
         if isnothing(ie.current)||ie.current.strength<0.3||ie.current.goal!=goal
             # Cooldown: якщо той самий goal повторився 3+ рази підряд — беремо інший
             recent = collect(ie.history)
-            if length(recent) >= 3 && all(g -> g == goal, recent[max(1,end-2):end])
+            if length(recent) >= 3 && all(g -> g == goal, recent[max(1, end-2):end])
                 all_goals = goals
                 alt_goals = filter(g -> g != goal, collect(all_goals))
                 if !isempty(alt_goals)
-                    goal = alt_goals[abs(hash(emotion * string(length(recent)))) % length(alt_goals) + 1]
+                    goal = alt_goals[abs(
+                        hash(emotion*string(length(recent))),
+                    )%length(alt_goals)+1]
                     origin = "cooldown"
                 end
             end
@@ -1549,7 +1551,8 @@ mutable struct InnerDialogue
     avoided_topics::Vector{String}
     topic_avoid_count::Dict{String,Int}
 end
-InnerDialogue() = InnerDialogue(0.3, :open, false, String[], 0, "", 0, String[], Dict{String,Int}())
+InnerDialogue() =
+    InnerDialogue(0.3, :open, false, String[], 0, "", 0, String[], Dict{String,Int}())
 
 function update_inner_dialogue!(
     id::InnerDialogue,
@@ -1667,7 +1670,8 @@ function id_from_json!(id::InnerDialogue, d::AbstractDict)
     id.pending_flash = Int(get(d, "pending_flash", 0))
     haskey(d, "avoided_topics") && (id.avoided_topics = String.(d["avoided_topics"]))
     if haskey(d, "topic_avoid_count")
-        id.topic_avoid_count = Dict{String,Int}(k => Int(v) for (k,v) in d["topic_avoid_count"])
+        id.topic_avoid_count =
+            Dict{String,Int}(k => Int(v) for (k, v) in d["topic_avoid_count"])
     end
 end
 
@@ -1895,6 +1899,7 @@ function psyche_load!(
         haskey(d, "inner_dialogue") && id_from_json!(id, d["inner_dialogue"])
         println("  [PSYCHE] Завантажено.")
     catch e
-        ; println("  [PSYCHE] Помилка: $e");
+        ;
+        println("  [PSYCHE] Помилка: $e");
     end
 end

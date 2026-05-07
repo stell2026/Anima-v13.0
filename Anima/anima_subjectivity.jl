@@ -316,14 +316,16 @@ function subj_outcome!(
     pred_id = subj._active_pred_id
     isnothing(pred_id) && return
 
-    pred_rows = Tables.rowtable(DBInterface.execute(
-        db,
-        """
-SELECT pred_arousal, pred_valence, pred_tension, pred_pe, pred_confidence
-FROM prediction_log WHERE id = ? AND closed = 0
-""",
-        (pred_id,),
-    ))
+    pred_rows = Tables.rowtable(
+        DBInterface.execute(
+            db,
+            """
+    SELECT pred_arousal, pred_valence, pred_tension, pred_pe, pred_confidence
+    FROM prediction_log WHERE id = ? AND closed = 0
+    """,
+            (pred_id,),
+        ),
+    )
 
     pred = nothing
     for r in pred_rows
@@ -911,18 +913,20 @@ function _subj_refresh_emerged!(subj::SubjectivityEngine)
     db = subj.mem.db
     subj._emerged_cache = NamedTuple[]
 
-    for row in Tables.rowtable(DBInterface.execute(
-        db,
-        """
-SELECT key, belief_type, centroid_arousal, centroid_valence,
-       centroid_tension, centroid_pe, strength, valence_bias,
-       activation_thr, confirmations, contradictions
-FROM emerged_beliefs
-WHERE strength > 0.1
-ORDER BY strength DESC
-LIMIT 20
-""",
-    ))
+    for row in Tables.rowtable(
+        DBInterface.execute(
+            db,
+            """
+    SELECT key, belief_type, centroid_arousal, centroid_valence,
+           centroid_tension, centroid_pe, strength, valence_bias,
+           activation_thr, confirmations, contradictions
+    FROM emerged_beliefs
+    WHERE strength > 0.1
+    ORDER BY strength DESC
+    LIMIT 20
+    """,
+        ),
+    )
         push!(
             subj._emerged_cache,
             (
@@ -946,15 +950,17 @@ function _subj_refresh_stances!(subj::SubjectivityEngine)
     db = subj.mem.db
     empty!(subj._stance_cache)
 
-    for row in Tables.rowtable(DBInterface.execute(
-        db,
-        """
-SELECT stance_key, valence_stance, certainty,
-       avoidance_weight, approach_weight, encounter_count
-FROM positional_stances
-WHERE certainty > 0.1
-""",
-    ))
+    for row in Tables.rowtable(
+        DBInterface.execute(
+            db,
+            """
+    SELECT stance_key, valence_stance, certainty,
+           avoidance_weight, approach_weight, encounter_count
+    FROM positional_stances
+    WHERE certainty > 0.1
+    """,
+        ),
+    )
         subj._stance_cache[String(row.stance_key)] = (
             valence_stance = _sfdb(row.valence_stance),
             certainty = _sfdb(row.certainty, 0.1),
@@ -989,14 +995,16 @@ function _subj_mean_episodic(
 end
 
 function _count_episodic(db::SQLite.DB, emotion::String)::Int
-    rows = Tables.rowtable(DBInterface.execute(
-        db,
-        """
-SELECT COUNT(*) as n FROM episodic_memory
-WHERE emotion = ? AND weight > 0.3
-""",
-        (emotion,),
-    ))
+    rows = Tables.rowtable(
+        DBInterface.execute(
+            db,
+            """
+    SELECT COUNT(*) as n FROM episodic_memory
+    WHERE emotion = ? AND weight > 0.3
+    """,
+            (emotion,),
+        ),
+    )
     for r in rows
         return _sidb(r.n)
     end

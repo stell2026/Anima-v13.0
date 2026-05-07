@@ -106,8 +106,9 @@ function dream_flash!(
 
     # Shadow injection: якщо тиск достатній — сон може будуватись навколо shadow
     shadow_source = false
-    if !isnothing(shadow_registry) && shadow_registry.pressure > 0.3 &&
-            !isempty(shadow_registry.items)
+    if !isnothing(shadow_registry) &&
+       shadow_registry.pressure > 0.3 &&
+       !isempty(shadow_registry.items)
         inject_prob = clamp((shadow_registry.pressure - 0.3) * 1.4, 0.0, 0.7)
         if rand() < inject_prob
             weighted = [(it.weight, it) for it in shadow_registry.items]

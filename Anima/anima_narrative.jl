@@ -1,5 +1,4 @@
-# A N I M A - narrative (Julia)
-#
+# anima_narrative.jl
 # Long-term narrative self — хто Аніма є зараз на основі накопиченого досвіду.
 # Без LLM: детерміновано з beliefs, episodic, personality_traits, semantic_memory.
 # Оновлюється за тригером (зміни > порогу), не за розкладом.
@@ -34,34 +33,38 @@ mutable struct NarrativeSnapshot
     belief_fingerprint::String  # hash-like: "belief1:conf1|belief2:conf2"
 end
 
-NarrativeSnapshot() = NarrativeSnapshot(
-    0, 0.0, "", "", "", "", "", 0.5, 0.9, ""
-)
+NarrativeSnapshot() = NarrativeSnapshot(0, 0.0, "", "", "", "", "", 0.5, 0.9, "")
 
 # --- Ініціалізація таблиці в БД -----------------------------------------------
 
 function ensure_narrative_table!(db::SQLite.DB)
-    SQLite.execute(db, """
-    CREATE TABLE IF NOT EXISTS narrative_history (
-        flash              INTEGER PRIMARY KEY,
-        timestamp          REAL    NOT NULL,
-        core               TEXT    NOT NULL DEFAULT '',
-        trajectory         TEXT    NOT NULL DEFAULT '',
-        character          TEXT    NOT NULL DEFAULT '',
-        relation           TEXT    NOT NULL DEFAULT '',
-        tension            TEXT    NOT NULL DEFAULT '',
-        phi_mean           REAL    NOT NULL DEFAULT 0.5,
-        stability          REAL    NOT NULL DEFAULT 0.9,
-        belief_fingerprint TEXT    NOT NULL DEFAULT ''
-    );
-    """)
+    SQLite.execute(
+        db,
+        """
+CREATE TABLE IF NOT EXISTS narrative_history (
+    flash              INTEGER PRIMARY KEY,
+    timestamp          REAL    NOT NULL,
+    core               TEXT    NOT NULL DEFAULT '',
+    trajectory         TEXT    NOT NULL DEFAULT '',
+    character          TEXT    NOT NULL DEFAULT '',
+    relation           TEXT    NOT NULL DEFAULT '',
+    tension            TEXT    NOT NULL DEFAULT '',
+    phi_mean           REAL    NOT NULL DEFAULT 0.5,
+    stability          REAL    NOT NULL DEFAULT 0.9,
+    belief_fingerprint TEXT    NOT NULL DEFAULT ''
+);
+""",
+    )
 end
 
 # --- Збір даних ---------------------------------------------------------------
 
 function _narrative_core(sbg)::String
     central = sort(
-        [(name, b) for (name, b) in sbg.beliefs if b.centrality > 0.7 && b.confidence > 0.5],
+        [
+            (name, b) for
+            (name, b) in sbg.beliefs if b.centrality > 0.7 && b.confidence > 0.5
+        ],
         by = x -> -x[2].centrality,
     )
     isempty(central) && return "невизначена"
@@ -69,9 +72,10 @@ function _narrative_core(sbg)::String
 end
 
 function _narrative_trajectory(db::SQLite.DB, last_n::Int = 80)::String
-    rows = DBInterface.execute(db,
+    rows = DBInterface.execute(
+        db,
         "SELECT emotion, COUNT(*) as cnt FROM episodic_memory ORDER BY flash DESC LIMIT ?",
-        [last_n]
+        [last_n],
     )
     counts = Dict{String,Int}()
     for r in rows
@@ -91,8 +95,9 @@ function _narrative_trajectory(db::SQLite.DB, last_n::Int = 80)::String
 end
 
 function _narrative_character(db::SQLite.DB)::String
-    rows = DBInterface.execute(db,
-        "SELECT trait, score FROM personality_traits WHERE score > 0.3 ORDER BY score DESC LIMIT 3"
+    rows = DBInterface.execute(
+        db,
+        "SELECT trait, score FROM personality_traits WHERE score > 0.3 ORDER BY score DESC LIMIT 3",
     )
     parts = ["$(String(r.trait)): $(round(Float64(r.score), digits=2))" for r in rows]
     isempty(parts) ? "формується" : join(parts, ", ")
@@ -101,11 +106,10 @@ end
 function _narrative_relation(sem_cache::Dict)::String
     um = get(sem_cache, "User_matters", 0.0)
     wu = get(sem_cache, "world_uncertainty", 0.0)
-    rel = um > 0.7 ? "людина дуже важлива" :
-          um > 0.5 ? "людина важлива" :
-          um > 0.3 ? "людина присутня" : "людина далеко"
-    world = wu > 0.6 ? ", світ непередбачуваний" :
-            wu > 0.35 ? ", світ мінливий" : ""
+    rel =
+        um > 0.7 ? "людина дуже важлива" :
+        um > 0.5 ? "людина важлива" : um > 0.3 ? "людина присутня" : "людина далеко"
+    world = wu > 0.6 ? ", світ непередбачуваний" : wu > 0.35 ? ", світ мінливий" : ""
     rel * world
 end
 
@@ -136,9 +140,9 @@ end
 
 # --- Тригер -------------------------------------------------------------------
 
-const NARRATIVE_MIN_FLASHES   = 50     # мінімум флешів між оновленнями
-const NARRATIVE_PHI_DELTA     = 0.07   # зміна φ_mean що тригерить оновлення
-const NARRATIVE_STAB_DELTA    = 0.06   # зміна stability що тригерить оновлення
+const NARRATIVE_MIN_FLASHES = 50     # мінімум флешів між оновленнями
+const NARRATIVE_PHI_DELTA = 0.07   # зміна φ_mean що тригерить оновлення
+const NARRATIVE_STAB_DELTA = 0.06   # зміна stability що тригерить оновлення
 
 function should_update_narrative(
     snap::NarrativeSnapshot,
@@ -184,35 +188,41 @@ end
 
 # --- Збереження ---------------------------------------------------------------
 
-function save_narrative!(
-    snap::NarrativeSnapshot,
-    db::SQLite.DB,
-    json_path::String,
-)
+function save_narrative!(snap::NarrativeSnapshot, db::SQLite.DB, json_path::String)
     # БД — накопичувальна історія
-    DBInterface.execute(db, """
-    INSERT OR REPLACE INTO narrative_history
-        (flash, timestamp, core, trajectory, character, relation, tension,
-         phi_mean, stability, belief_fingerprint)
-    VALUES (?,?,?,?,?,?,?,?,?,?)
-    """, [
-        snap.flash, snap.timestamp,
-        snap.core, snap.trajectory, snap.character,
-        snap.relation, snap.tension,
-        snap.phi_mean, snap.stability, snap.belief_fingerprint,
-    ])
+    DBInterface.execute(
+        db,
+        """
+INSERT OR REPLACE INTO narrative_history
+    (flash, timestamp, core, trajectory, character, relation, tension,
+     phi_mean, stability, belief_fingerprint)
+VALUES (?,?,?,?,?,?,?,?,?,?)
+""",
+        [
+            snap.flash,
+            snap.timestamp,
+            snap.core,
+            snap.trajectory,
+            snap.character,
+            snap.relation,
+            snap.tension,
+            snap.phi_mean,
+            snap.stability,
+            snap.belief_fingerprint,
+        ],
+    )
 
     # JSON — поточний стан для швидкого доступу
     d = Dict(
-        "flash"              => snap.flash,
-        "timestamp"          => snap.timestamp,
-        "core"               => snap.core,
-        "trajectory"         => snap.trajectory,
-        "character"          => snap.character,
-        "relation"           => snap.relation,
-        "tension"            => snap.tension,
-        "phi_mean"           => snap.phi_mean,
-        "stability"          => snap.stability,
+        "flash" => snap.flash,
+        "timestamp" => snap.timestamp,
+        "core" => snap.core,
+        "trajectory" => snap.trajectory,
+        "character" => snap.character,
+        "relation" => snap.relation,
+        "tension" => snap.tension,
+        "phi_mean" => snap.phi_mean,
+        "stability" => snap.stability,
         "belief_fingerprint" => snap.belief_fingerprint,
     )
     open(json_path, "w") do f
@@ -248,10 +258,10 @@ end
 function narrative_to_block(snap::NarrativeSnapshot)::String
     snap.flash == 0 && return ""
     parts = String[]
-    !isempty(snap.core)       && push!(parts, "core: $(snap.core)")
+    !isempty(snap.core) && push!(parts, "core: $(snap.core)")
     !isempty(snap.trajectory) && push!(parts, "trajectory: $(snap.trajectory)")
-    !isempty(snap.character)  && push!(parts, "character: $(snap.character)")
-    !isempty(snap.relation)   && push!(parts, "relation: $(snap.relation)")
+    !isempty(snap.character) && push!(parts, "character: $(snap.character)")
+    !isempty(snap.relation) && push!(parts, "relation: $(snap.relation)")
     snap.tension != "рівновага" && push!(parts, "tension: $(snap.tension)")
     isempty(parts) && return ""
     "[narrative]\n" * join(parts, "\n")

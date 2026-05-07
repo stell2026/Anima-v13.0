@@ -89,7 +89,8 @@ function validate_input_signal(raw::Dict{String,Any})::Dict{String,Float64}
     try
         conf = Float64(conf)
     catch
-        ; return Dict{String,Float64}()
+        ;
+        return Dict{String,Float64}()
     end
     conf < INPUT_LLM_CONFIDENCE_THRESHOLD && return Dict{String,Float64}()
 
@@ -101,7 +102,8 @@ function validate_input_signal(raw::Dict{String,Any})::Dict{String,Float64}
         v = try
             Float64(raw[k])
         catch
-            ; return Dict{String,Float64}()
+            ;
+            return Dict{String,Float64}()
         end
         (isnan(v) || isinf(v)) && return Dict{String,Float64}()
         result[k] = clamp(v, -INPUT_LLM_MAX_DELTA, INPUT_LLM_MAX_DELTA)

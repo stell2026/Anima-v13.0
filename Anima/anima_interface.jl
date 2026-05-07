@@ -192,7 +192,7 @@ mutable struct Anima
     _last_self_msg_flash::Int    # flash count of last self-initiated message
     authenticity_veto::Bool      # Аніма внутрішньо не погоджується з запитом
     _session_phi_acc::Float64    # поточне середнє φ за сесію (для передачі між сесіями)
-    _last_belief_conflict        # останній конфлікт переконань (або nothing)
+    _last_belief_conflict::Any        # останній конфлікт переконань (або nothing)
     narrative_snap::NarrativeSnapshot  # поточний narrative self
 end
 
@@ -312,7 +312,8 @@ function Anima(;
                 origin = String(get(ie_d, "current_origin", "drive"))
                 if !isempty(goal) && strength > 0.1
                     # floor 0.35 — щоб вижити два decay на першому флеші
-                    a.intent_engine.current = Intent(goal, max(strength * 0.7, 0.35), origin)
+                    a.intent_engine.current =
+                        Intent(goal, max(strength * 0.7, 0.35), origin)
                 end
                 hist = get(ie_d, "history", String[])
                 for g in hist
@@ -400,10 +401,13 @@ function save!(a::Anima; summary = "", verbose = false)
         "unknown_register"=>ur_to_json(a.unknown_register),
         "authenticity_monitor"=>am_to_json(a.authenticity_monitor),
         "intent_engine"=>Dict(
-            "current_goal"     => isnothing(a.intent_engine.current) ? "" : a.intent_engine.current.goal,
-            "current_strength" => isnothing(a.intent_engine.current) ? 0.0 : a.intent_engine.current.strength,
-            "current_origin"   => isnothing(a.intent_engine.current) ? "" : a.intent_engine.current.origin,
-            "history"          => collect(a.intent_engine.history),
+            "current_goal" =>
+                isnothing(a.intent_engine.current) ? "" : a.intent_engine.current.goal,
+            "current_strength" =>
+                isnothing(a.intent_engine.current) ? 0.0 : a.intent_engine.current.strength,
+            "current_origin" =>
+                isnothing(a.intent_engine.current) ? "" : a.intent_engine.current.origin,
+            "history" => collect(a.intent_engine.history),
         ),
     )
     open(self_path, "w") do f
@@ -426,13 +430,13 @@ function experience!(
     stim = copy(stimulus_raw)
 
     # Structural opposition: чи повідомлення людини суперечить центральному переконанню?
-    belief_conflict = isempty(user_message) ? nothing : detect_belief_conflict(a.sbg, user_message)
+    belief_conflict =
+        isempty(user_message) ? nothing : detect_belief_conflict(a.sbg, user_message)
     a._last_belief_conflict = belief_conflict
     if !isnothing(belief_conflict)
         # Накопичуємо в LatentBuffer
-        a.latent_buffer.resistance = clamp01(
-            a.latent_buffer.resistance + belief_conflict.signal_strength * 0.4
-        )
+        a.latent_buffer.resistance =
+            clamp01(a.latent_buffer.resistance + belief_conflict.signal_strength * 0.4)
         @info "[RESISTANCE] переконання під тиском: \"$(belief_conflict.belief_name)\" signal=$(belief_conflict.signal_strength)"
     end
 
@@ -527,7 +531,14 @@ function experience!(
     end
     id_stability = phi / (1.0+t)
     # Попередній виклик з поточним (ще не оновленим) ownership — для решти логіки флешу
-    intent = update_intent!(a.intent_engine, dom_drive, named, id_stability, a.values, Float64(a.agency.causal_ownership))
+    intent = update_intent!(
+        a.intent_engine,
+        dom_drive,
+        named,
+        id_stability,
+        a.values,
+        Float64(a.agency.causal_ownership),
+    )
 
     # Dissonance + Defense
     diss = compute_dissonance(intent, t, a_r, s, c)
@@ -562,8 +573,10 @@ function experience!(
     let su = a.anchor.session_uncertainty
         if su > 0.4
             boost = (su - 0.4) * 0.15
-            a.significance.existential = clamp(a.significance.existential + boost * intensity, 0.0, 1.0)
-            a.significance.relational  = clamp(a.significance.relational  + boost * intensity * 0.5, 0.0, 1.0)
+            a.significance.existential =
+                clamp(a.significance.existential + boost * intensity, 0.0, 1.0)
+            a.significance.relational =
+                clamp(a.significance.relational + boost * intensity * 0.5, 0.0, 1.0)
         end
     end
 
@@ -667,11 +680,12 @@ function experience!(
     # Низька φ → prior залишається широким, менш схильним до оновлення
     let φ_factor = clamp(phi_posterior * 0.15, 0.0, 0.12)
         # prior_mu зсувається до posterior пропорційно до φ
-        a.gen_model.prior_mu = a.gen_model.prior_mu .* (1.0 - φ_factor) .+
-                                a.gen_model.posterior_mu .* φ_factor
+        a.gen_model.prior_mu =
+            a.gen_model.prior_mu .* (1.0 - φ_factor) .+ a.gen_model.posterior_mu .* φ_factor
         # prior_sigma: висока φ звужує (більша впевненість у prior), низька розширює
         phi_sigma_effect = clamp((phi_posterior - 0.5) * 0.12, -0.06, 0.06)
-        a.gen_model.prior_sigma = clamp(a.gen_model.prior_sigma - phi_sigma_effect, 0.3, 1.2)
+        a.gen_model.prior_sigma =
+            clamp(a.gen_model.prior_sigma - phi_sigma_effect, 0.3, 1.2)
     end
     push_event!(
         a.narrative_gravity,
@@ -724,7 +738,15 @@ function experience!(
     # Має бути ДО register_intent! — спочатку оцінюємо що було, потім реєструємо нове
     _agency_eval = evaluate_agency!(a.agency, vad, a.flash_count)
     # Оновлюємо intent з актуальним ownership — без повторного decay
-    intent = update_intent!(a.intent_engine, dom_drive, named, id_stability, a.values, Float64(a.agency.causal_ownership); skip_decay = true)
+    intent = update_intent!(
+        a.intent_engine,
+        dom_drive,
+        named,
+        id_stability,
+        a.values,
+        Float64(a.agency.causal_ownership);
+        skip_decay = true,
+    )
     # Resistance override: якщо центральне переконання під тиском — intent змінюється
     if !isnothing(belief_conflict) && belief_conflict.signal_strength > 0.5
         intent = (goal = "відстояти межу", strength = belief_conflict.signal_strength)
@@ -732,7 +754,15 @@ function experience!(
     # Реєструємо intent завжди
     _intent_goal = isnothing(intent) ? "бути присутньою" : intent.goal
     register_intent!(a.agency, _intent_goal, vad, a.gen_model.posterior_mu)
-    self_snap = update_self!(a.sbg, a.spm, a.agency, vad, a.gen_model, a.flash_count; agency_result = _agency_eval)
+    self_snap = update_self!(
+        a.sbg,
+        a.spm,
+        a.agency,
+        vad,
+        a.gen_model,
+        a.flash_count;
+        agency_result = _agency_eval,
+    )
 
     # Crisis Module
     crisis_snap = update_crisis!(
@@ -754,12 +784,23 @@ function experience!(
         let _nfp = replace(a.psyche_mem_path, "psyche" => "narrative")
             _nstab = self_snap.sbg.attractor_stability
             _nfing = _belief_fingerprint(a.sbg)
-            if should_update_narrative(a.narrative_snap, a.flash_count, a._session_phi_acc, _nstab, _nfing)
+            if should_update_narrative(
+                a.narrative_snap,
+                a.flash_count,
+                a._session_phi_acc,
+                _nstab,
+                _nfing,
+            )
                 try
                     a.narrative_snap = build_narrative_snapshot(
-                        a.flash_count, a.sbg, mem.db, mem._semantic_cache,
-                        a.goal_conflict, a.latent_buffer,
-                        a._session_phi_acc, _nstab,
+                        a.flash_count,
+                        a.sbg,
+                        mem.db,
+                        mem._semantic_cache,
+                        a.goal_conflict,
+                        a.latent_buffer,
+                        a._session_phi_acc,
+                        _nstab,
                     )
                     save_narrative!(a.narrative_snap, mem.db, _nfp)
                     @info "[NARRATIVE] оновлено на флеші $(a.flash_count): core=$(a.narrative_snap.core)"
@@ -825,8 +866,8 @@ function experience!(
 
     # VFE-based unpredictability: нудьга → synthetic surprise
     if length(a.crisis.coherence_history.data) >= 5 &&
-            mean(a.crisis.coherence_history.data) > 0.9 &&
-            vfe_r.vfe < 0.02
+       mean(a.crisis.coherence_history.data) > 0.9 &&
+       vfe_r.vfe < 0.02
         synthetic_surprise = 0.1 * rand()
         a.nt.noradrenaline = clamp01(a.nt.noradrenaline + synthetic_surprise * 0.05)
     end
@@ -989,10 +1030,15 @@ function build_narrative(
 
     raw_notes = Tuple{Symbol,String}[]
 
-    !isempty(a.temporal.subjective_note) && !a._subjective_note_shown &&
-        (push!(raw_notes, (:always, a.temporal.subjective_note)); a._subjective_note_shown = true)
+    !isempty(a.temporal.subjective_note) &&
+        !a._subjective_note_shown &&
+        (
+            push!(raw_notes, (:always, a.temporal.subjective_note));
+            a._subjective_note_shown = true
+        )
     # circadian_note — тільки якщо змінилась (нова година)
-    if !isempty(a.temporal.circadian_note) && a.temporal.circadian_note != a._last_circadian_note
+    if !isempty(a.temporal.circadian_note) &&
+       a.temporal.circadian_note != a._last_circadian_note
         push!(raw_notes, (:always, a.temporal.circadian_note))
         a._last_circadian_note = a.temporal.circadian_note
     end
@@ -1185,24 +1231,24 @@ function self_hear!(a::Anima, reply::String)
     isempty(strip(reply)) && return
     startswith(reply, "[LLM") && return
 
-    raw  = text_to_stimulus(reply)
+    raw = text_to_stimulus(reply)
     stim = Dict(k => v * SELF_HEAR_SCALE for (k, v) in raw)
     mismatch = _self_speech_mismatch(a, raw)
 
     if mismatch > 0.35
-        a.authenticity_monitor.authenticity_drift = clamp(
-            a.authenticity_monitor.authenticity_drift + mismatch * 0.12, 0.0, 1.0)
+        a.authenticity_monitor.authenticity_drift =
+            clamp(a.authenticity_monitor.authenticity_drift + mismatch * 0.12, 0.0, 1.0)
         mismatch > 0.55 && push!(a.authenticity_monitor.last_flags, "self_speech_mismatch")
         a.nt.noradrenaline = clamp(a.nt.noradrenaline + mismatch * 0.06, 0.0, 1.0)
     else
         a.nt.serotonin = clamp(a.nt.serotonin + 0.01, 0.0, 1.0)
-        a.authenticity_monitor.authenticity_drift = clamp(
-            a.authenticity_monitor.authenticity_drift - 0.03, 0.0, 1.0)
+        a.authenticity_monitor.authenticity_drift =
+            clamp(a.authenticity_monitor.authenticity_drift - 0.03, 0.0, 1.0)
     end
 
     for (k, v) in stim
         if k == "satisfaction"
-            a.nt.dopamine  = clamp(a.nt.dopamine  + v * 0.5, 0.0, 1.0)
+            a.nt.dopamine = clamp(a.nt.dopamine + v * 0.5, 0.0, 1.0)
             a.nt.serotonin = clamp(a.nt.serotonin + v * 0.5, 0.0, 1.0)
         elseif k == "tension"
             a.nt.noradrenaline = clamp(a.nt.noradrenaline + v * 0.6, 0.0, 1.0)
@@ -1290,10 +1336,8 @@ function build_identity_block(a::Anima, mem_db = nothing)::String
         # self-model: перекладаємо технічні ключі в стан мовою першої особи
         try
             sem = Dict{String,Float64}()
-            for row in DBInterface.execute(
-                mem_db.db,
-                "SELECT key, value FROM semantic_memory",
-            )
+            for row in
+                DBInterface.execute(mem_db.db, "SELECT key, value FROM semantic_memory")
                 sem[String(row.key)] = Float64(row.value)
             end
             state_notes = String[]
@@ -1329,7 +1373,7 @@ function build_identity_block(a::Anima, mem_db = nothing)::String
             if length(type_counts) > 1
                 # різноманіття є — показуємо домінантні типи
                 ep_notes = String[]
-                for (t, n) in sort(collect(type_counts), by=kv->-kv[2])
+                for (t, n) in sort(collect(type_counts), by = kv->-kv[2])
                     avg_val = val_sum[t] / n
                     tone = avg_val > 0.2 ? "+" : avg_val < -0.2 ? "-" : "~"
                     push!(ep_notes, "$t($tone)")
@@ -1539,8 +1583,7 @@ function anima_state_snapshot(a::Anima)
         phi = round(phi, digits = 3),
         contact_hunger_note = begin
             cn = Float64(a.sig_layer.contact_need)
-            cn > 0.85 ? "сильне бажання контакту" :
-            cn > 0.70 ? "хочу контакту" : ""
+            cn > 0.85 ? "сильне бажання контакту" : cn > 0.70 ? "хочу контакту" : ""
         end,
         authenticity_veto = a.authenticity_veto,
         pending_thought = a.inner_dialogue.pending_thought,
@@ -1635,7 +1678,9 @@ function build_state_prompt(
     let su = get(state, :session_uncertainty, 0.3)
         sc = get(state, :session_count, 0)
         if su > 0.55
-            prompt = prompt * "\n[цей момент може не повторитись — session_uncertainty=$(round(su,digits=2))]"
+            prompt =
+                prompt *
+                "\n[цей момент може не повторитись — session_uncertainty=$(round(su,digits=2))]"
         end
     end
     return prompt

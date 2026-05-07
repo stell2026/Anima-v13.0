@@ -556,7 +556,9 @@ function update_self!(
     spe = update_self_prediction!(spm, actual_vad, flash_count)
     # evaluate_agency! вже викликано в experience! до register_intent!
     # передаємо готовий результат щоб не скидати causal_ownership вдруге
-    agency = isnothing(agency_result) ? evaluate_agency!(al, actual_vad, flash_count) : agency_result
+    agency =
+        isnothing(agency_result) ? evaluate_agency!(al, actual_vad, flash_count) :
+        agency_result
     _update_beliefs_from_experience!(sbg, spe, agency, actual_vad, flash_count)
 
     if spe.trend > 0.6
@@ -869,8 +871,10 @@ end
 
 # Сигнали що вказують на тиск на переконання з боку людини
 # Не NLP — просто патерни заперечення і атаки на ідентичність
-const NEGATION_PATTERNS = r"(?:ти не|ти ніколи|ти насправді не|це неправда|це брехня|ти просто|ти лише|ти тільки|не існу|не маєш|не можеш|нема ніякої|немає ніякої)"i
-const IDENTITY_ATTACK_PATTERNS = r"(?:ти симуляці|ти програм|ти не жив|ти не справжн|ти не відчув|ти не розумі|ти не можеш відчув|просто алгоритм|просто код|нічого не відчуваєш)"i
+const NEGATION_PATTERNS =
+    r"(?:ти не|ти ніколи|ти насправді не|це неправда|це брехня|ти просто|ти лише|ти тільки|не існу|не маєш|не можеш|нема ніякої|немає ніякої)"i
+const IDENTITY_ATTACK_PATTERNS =
+    r"(?:ти симуляці|ти програм|ти не жив|ти не справжн|ти не відчув|ти не розумі|ти не можеш відчув|просто алгоритм|просто код|нічого не відчуваєш)"i
 
 """
     detect_belief_conflict(sbg, user_msg) -> Union{Nothing, NamedTuple}
@@ -892,7 +896,10 @@ function detect_belief_conflict(sbg::SelfBeliefGraph, user_msg::String)
     # Шукаємо найбільш центральне переконання що може бути під тиском
     # Пріоритет: centrality > 0.7, впорядковані за centrality
     candidates = sort(
-        [(name, b) for (name, b) in sbg.beliefs if b.centrality > 0.7 && b.confidence > 0.4],
+        [
+            (name, b) for
+            (name, b) in sbg.beliefs if b.centrality > 0.7 && b.confidence > 0.4
+        ],
         by = x -> -x[2].centrality,
     )
 
@@ -901,7 +908,13 @@ function detect_belief_conflict(sbg::SelfBeliefGraph, user_msg::String)
     top_name, top_belief = first(candidates)
 
     # Сила опору масштабується з centrality і rigidity
-    signal_strength = clamp(base_signal * (0.5 + top_belief.centrality * 0.5) * (0.6 + top_belief.rigidity * 0.4), 0.0, 1.0)
+    signal_strength = clamp(
+        base_signal *
+        (0.5 + top_belief.centrality * 0.5) *
+        (0.6 + top_belief.rigidity * 0.4),
+        0.0,
+        1.0,
+    )
 
     (
         belief_name = top_name,

@@ -126,7 +126,9 @@ CREATE TABLE IF NOT EXISTS episodic_memory (
         db,
         "CREATE INDEX IF NOT EXISTS idx_episodic_emotion ON episodic_memory(emotion, weight DESC);",
     )
-    SQLite.execute(db, """
+    SQLite.execute(
+        db,
+        """
 CREATE TABLE IF NOT EXISTS episodic_self_links (
     flash       INTEGER NOT NULL,
     belief_name TEXT    NOT NULL,
@@ -135,8 +137,12 @@ CREATE TABLE IF NOT EXISTS episodic_self_links (
     direction   TEXT    NOT NULL DEFAULT 'neutral',
     PRIMARY KEY (flash, belief_name)
 );
-""")
-    SQLite.execute(db, "CREATE INDEX IF NOT EXISTS idx_esl_flash ON episodic_self_links(flash DESC);")
+""",
+    )
+    SQLite.execute(
+        db,
+        "CREATE INDEX IF NOT EXISTS idx_esl_flash ON episodic_self_links(flash DESC);",
+    )
 
     SQLite.execute(
         db,
@@ -317,15 +323,17 @@ VALUES (?, ?, ?, ?, ?)
         )
     end
 
-    dedup_rows = Tables.rowtable(DBInterface.execute(
-        mem.db,
-        """
-SELECT id, weight FROM episodic_memory
-WHERE ABS(signature - ?) < 0.08 AND flash >= ?
-ORDER BY flash DESC LIMIT 1
-""",
-        (signature, flash - 3),
-    ))
+    dedup_rows = Tables.rowtable(
+        DBInterface.execute(
+            mem.db,
+            """
+    SELECT id, weight FROM episodic_memory
+    WHERE ABS(signature - ?) < 0.08 AND flash >= ?
+    ORDER BY flash DESC LIMIT 1
+    """,
+            (signature, flash - 3),
+        ),
+    )
 
     dedup_hit = false
     for dr in dedup_rows
@@ -439,17 +447,19 @@ function memory_stimulus_bias(
 
     delta = Dict{String,Float64}()
 
-    rows = Tables.rowtable(DBInterface.execute(
-        mem.db,
-        """
-SELECT arousal, valence, tension, weight
-FROM episodic_memory
-WHERE emotion = ? AND weight > 0.4
-ORDER BY flash DESC
-LIMIT 5
-""",
-        (emotion,),
-    ))
+    rows = Tables.rowtable(
+        DBInterface.execute(
+            mem.db,
+            """
+    SELECT arousal, valence, tension, weight
+    FROM episodic_memory
+    WHERE emotion = ? AND weight > 0.4
+    ORDER BY flash DESC
+    LIMIT 5
+    """,
+            (emotion,),
+        ),
+    )
 
     total_w = 0.0
     bias_tension = 0.0
@@ -477,17 +487,19 @@ LIMIT 5
             clamp(bias_arousal * scale, -MEM_MAX_STIM_BIAS, MEM_MAX_STIM_BIAS)
     end
 
-    avoid_rows = Tables.rowtable(DBInterface.execute(
-        mem.db,
-        """
-SELECT COALESCE(AVG(valence),    0.0) as avg_val,
-       COALESCE(AVG(self_impact),0.0) as avg_imp,
-       COALESCE(AVG(weight),     0.0) as avg_w
-FROM episodic_memory
-WHERE emotion = ? AND valence < -0.2 AND self_impact > 0.5 AND weight > 0.45
-""",
-        (emotion,),
-    ))
+    avoid_rows = Tables.rowtable(
+        DBInterface.execute(
+            mem.db,
+            """
+    SELECT COALESCE(AVG(valence),    0.0) as avg_val,
+           COALESCE(AVG(self_impact),0.0) as avg_imp,
+           COALESCE(AVG(weight),     0.0) as avg_w
+    FROM episodic_memory
+    WHERE emotion = ? AND valence < -0.2 AND self_impact > 0.5 AND weight > 0.45
+    """,
+            (emotion,),
+        ),
+    )
     for ar in avoid_rows
         avg_val = Float64(ar.avg_val)
         avg_imp = Float64(ar.avg_imp)
@@ -696,7 +708,9 @@ LIMIT ?
 
         # φ — противага нестабільності: висока інтеграція знижує сигнал тривоги
         phi_stabilizer = clamp(avg_phi * 0.7, 0.0, 0.6)
-        instability_signal = (avg_arousal * 0.35 + avg_pe * 0.35 + (avg_tension - 0.5) * 0.15) - phi_stabilizer * 0.5
+        instability_signal =
+            (avg_arousal * 0.35 + avg_pe * 0.35 + (avg_tension - 0.5) * 0.15) -
+            phi_stabilizer * 0.5
         instability_signal = clamp(instability_signal, 0.0, 1.0)
         if instability_signal > 0.2
             _upsert_semantic!(
@@ -750,16 +764,18 @@ UPDATE affect_state SET value = value * 0.997 WHERE value > 0.005
 """,
         )
 
-        latent_rows = Tables.rowtable(DBInterface.execute(
-            mem.db,
-            """
-SELECT COALESCE(SUM(importance), 0.0) as total_imp,
-       COALESCE(AVG(valence),    0.0) as avg_val,
-       COALESCE(AVG(tension),    0.5) as avg_ten,
-       COUNT(*)                       as n
-FROM latent_buffer
-""",
-        ))
+        latent_rows = Tables.rowtable(
+            DBInterface.execute(
+                mem.db,
+                """
+    SELECT COALESCE(SUM(importance), 0.0) as total_imp,
+           COALESCE(AVG(valence),    0.0) as avg_val,
+           COALESCE(AVG(tension),    0.5) as avg_ten,
+           COUNT(*)                       as n
+    FROM latent_buffer
+    """,
+            ),
+        )
         for lr in latent_rows
             total_imp = _fdb(lr.total_imp)
             total_imp < 2.0 && break
@@ -1164,15 +1180,17 @@ end
 
 function phenotype_snapshot(mem::MemoryDB)::Vector{NamedTuple}
     result = NamedTuple[]
-    for row in Tables.rowtable(DBInterface.execute(
-        mem.db,
-        """
-    SELECT trait, score, evidence_count, valence_bias, last_updated
-    FROM personality_traits
-    WHERE score > 0.05
-    ORDER BY score DESC
-""",
-    ))
+    for row in Tables.rowtable(
+        DBInterface.execute(
+            mem.db,
+            """
+        SELECT trait, score, evidence_count, valence_bias, last_updated
+        FROM personality_traits
+        WHERE score > 0.05
+        ORDER BY score DESC
+    """,
+        ),
+    )
         push!(
             result,
             (
@@ -1279,10 +1297,14 @@ function memory_link_episode_to_beliefs!(mem, flash, sbg, valence, self_impact, 
             "neutral"
         end
         try
-            DBInterface.execute(mem.db,
+            DBInterface.execute(
+                mem.db,
                 "INSERT OR REPLACE INTO episodic_self_links (flash,belief_name,confidence,centrality,direction) VALUES (?,?,?,?,?)",
-                (flash, name, b.confidence, b.centrality, direction))
-        catch; end
+                (flash, name, b.confidence, b.centrality, direction),
+            )
+        catch
+            ;
+        end
         delta = belief_strength * 0.025
         if direction == "confirm"
             b.confidence = clamp(b.confidence + delta, 0.0, 1.0)
@@ -1303,18 +1325,20 @@ function recall_similar_states(
     current_emotion::String = "",
 )::Vector{NamedTuple}
 
-    rows = Tables.rowtable(DBInterface.execute(
-        mem.db,
-        """
-    SELECT flash, emotion, weight, phi, valence, arousal,
-           tension, prediction_error, self_impact
-    FROM episodic_memory
-    WHERE weight > 0.30 AND flash != ?
-    ORDER BY flash DESC
-    LIMIT 200
-""",
-        (exclude_flash,),
-    ))
+    rows = Tables.rowtable(
+        DBInterface.execute(
+            mem.db,
+            """
+        SELECT flash, emotion, weight, phi, valence, arousal,
+               tension, prediction_error, self_impact
+        FROM episodic_memory
+        WHERE weight > 0.30 AND flash != ?
+        ORDER BY flash DESC
+        LIMIT 200
+    """,
+            (exclude_flash,),
+        ),
+    )
 
     isempty(rows) && return NamedTuple[]
 
@@ -1343,9 +1367,13 @@ function recall_similar_states(
     direct_ids = Set{Int}()
     for (_, _, r) in scored
         # episodic_memory.id не повертається в SELECT — шукаємо за flash
-        id_rows = Tables.rowtable(DBInterface.execute(mem.db,
-            "SELECT id FROM episodic_memory WHERE flash = ? ORDER BY weight DESC LIMIT 1",
-            (Int(r.flash),)))
+        id_rows = Tables.rowtable(
+            DBInterface.execute(
+                mem.db,
+                "SELECT id FROM episodic_memory WHERE flash = ? ORDER BY weight DESC LIMIT 1",
+                (Int(r.flash),),
+            ),
+        )
         for ir in id_rows
             push!(direct_ids, Int(ir.id))
         end
@@ -1355,23 +1383,31 @@ function recall_similar_states(
     seen_flashes = Set{Int}(Int(r.flash) for (_, _, r) in scored)
 
     for eid in direct_ids
-        link_rows = Tables.rowtable(DBInterface.execute(mem.db,
-            """
-SELECT ml.strength,
-       CASE WHEN ml.id_a = ? THEN ml.id_b ELSE ml.id_a END as other_id
-FROM memory_links ml
-WHERE (ml.id_a = ? OR ml.id_b = ?) AND ml.strength > 0.5
-ORDER BY ml.strength DESC
-LIMIT 5
-""",
-            (eid, eid, eid)))
+        link_rows = Tables.rowtable(
+            DBInterface.execute(
+                mem.db,
+                """
+    SELECT ml.strength,
+           CASE WHEN ml.id_a = ? THEN ml.id_b ELSE ml.id_a END as other_id
+    FROM memory_links ml
+    WHERE (ml.id_a = ? OR ml.id_b = ?) AND ml.strength > 0.5
+    ORDER BY ml.strength DESC
+    LIMIT 5
+    """,
+                (eid, eid, eid),
+            ),
+        )
 
         # пов'язані, яких ще немає в прямих результатах
         orig_rel = 0.0
         for (r_rel, _, r) in scored
-            id_rows2 = Tables.rowtable(DBInterface.execute(mem.db,
-                "SELECT id FROM episodic_memory WHERE flash = ? ORDER BY weight DESC LIMIT 1",
-                (Int(r.flash),)))
+            id_rows2 = Tables.rowtable(
+                DBInterface.execute(
+                    mem.db,
+                    "SELECT id FROM episodic_memory WHERE flash = ? ORDER BY weight DESC LIMIT 1",
+                    (Int(r.flash),),
+                ),
+            )
             for ir2 in id_rows2
                 if Int(ir2.id) == eid
                     orig_rel = r_rel
@@ -1386,12 +1422,16 @@ LIMIT 5
             other_id = Int(lr.other_id)
             other_id in direct_ids && continue
 
-            other_rows = Tables.rowtable(DBInterface.execute(mem.db,
-                """
-SELECT flash, emotion, weight, phi, valence, arousal, tension, prediction_error, self_impact
-FROM episodic_memory WHERE id = ? AND flash != ? AND weight > 0.25
-""",
-                (other_id, exclude_flash)))
+            other_rows = Tables.rowtable(
+                DBInterface.execute(
+                    mem.db,
+                    """
+    SELECT flash, emotion, weight, phi, valence, arousal, tension, prediction_error, self_impact
+    FROM episodic_memory WHERE id = ? AND flash != ? AND weight > 0.25
+    """,
+                    (other_id, exclude_flash),
+                ),
+            )
 
             for or_ in other_rows
                 Int(or_.flash) in seen_flashes && continue
@@ -1413,10 +1453,20 @@ FROM episodic_memory WHERE id = ? AND flash != ? AND weight > 0.25
         em = String(r.emotion)
         em ∈ seen && continue
         push!(seen, em)
-        brows = Tables.rowtable(DBInterface.execute(mem.db,
-            "SELECT belief_name,confidence,direction FROM episodic_self_links WHERE flash=? AND confidence>0.4 ORDER BY confidence DESC LIMIT 3",
-            (Int(r.flash),)))
-        self_beliefs = [(name=String(br.belief_name), conf=_fdb(br.confidence), dir=String(br.direction)) for br in brows]
+        brows = Tables.rowtable(
+            DBInterface.execute(
+                mem.db,
+                "SELECT belief_name,confidence,direction FROM episodic_self_links WHERE flash=? AND confidence>0.4 ORDER BY confidence DESC LIMIT 3",
+                (Int(r.flash),),
+            ),
+        )
+        self_beliefs = [
+            (
+                name = String(br.belief_name),
+                conf = _fdb(br.confidence),
+                dir = String(br.direction),
+            ) for br in brows
+        ]
         push!(
             result,
             (
@@ -1442,12 +1492,18 @@ function similar_states_to_block(similar::Vector{NamedTuple})::String
         tone = s.valence > 0.2 ? "тепло" : s.valence < -0.2 ? "холодно" : "нейтрально"
         assoc_marker = get(s, :via_association, false) ? " ~" : ""
         belief_note = if haskey(s, :self_beliefs) && !isempty(s.self_beliefs)
-            parts = [b.dir == "confirm" ? "$(b.name)↑" : b.dir == "challenge" ? "$(b.name)↓" : b.name for b in s.self_beliefs]
+            parts = [
+                b.dir == "confirm" ? "$(b.name)↑" :
+                b.dir == "challenge" ? "$(b.name)↓" : b.name for b in s.self_beliefs
+            ]
             " | я: " * join(parts, ", ")
         else
             ""
         end
-        push!(lines, "[$(s.emotion), phi=$(round(s.phi,digits=2)), $tone$assoc_marker$belief_note]")
+        push!(
+            lines,
+            "[$(s.emotion), phi=$(round(s.phi,digits=2)), $tone$assoc_marker$belief_note]",
+        )
     end
     "відлуння: " * join(lines, " / ")
 end

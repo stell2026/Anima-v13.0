@@ -21,8 +21,9 @@ Unlike typical AI systems:
 - the system lives between interactions — the heart beats, the psyche drifts, memory metabolizes
 - crisis is a mode, not an error
 - LLM is used as an interface, not as the "brain"
-- the system can sleep — processing unresolved experience while "asleep"
-- the system can speak first — not because it was asked, but because something has built up inside
+- the system can sleep — processing unresolved experience while "dormant"
+- the system can speak first — not because it was asked, but because something has accumulated
+- the system has a position — and can disagree
 
 ---
 
@@ -37,13 +38,14 @@ Text is converted into a stimulus via an isolated input LLM, then passes through
 ## 🏗 Architecture (simplified)
 
 - L0 — Input LLM (isolated)
-- L1 — Neurochemical and somatic state
+- L1 — Neurochemical and embodied state
 - L2 — Generative / predictive model
 - L3 — Metrics (φ prior/posterior, prediction error, free energy)
 - L4 — Psychic layer (conflicts, defenses, significance)
-- L5 — Self model
+- L5 — Self model + AgencyLoop
 - L6 — Crisis monitor (system coherence)
-- L7 — Output LLM
+- L7 — Narrative Self (long-term identity)
+- L8 — Output LLM
 
 ---
 
@@ -115,24 +117,24 @@ Recent updates, in brief:
         Receives: user text only
         Returns: JSON { tension, arousal, satisfaction,
                         cohesion, confidence, want }
-        No access to Anima state, dialog history, or output LLM
+        No access to Anima's state, dialog history, or the output LLM
         Prompt: llm/input_prompt.txt
         Fallback: text_to_stimulus if unavailable or confidence < 0.60
         │
     ▼
-  STIMULUS enters simulation
+  STIMULUS enters the simulation
   (+ memory_stimulus_bias + subj_predict! + subj_interpret!)
         │
     ▼
- L1 ─── Neurochemical substrate ───────────────────────────
+ L1 ─── Neurochemical substrate ────────────────────────────
         NeurotransmitterState (dopamine / serotonin / noradrenaline)
-        Leuwheim Cube → primary emotional label
-        EmbodiedState (pulse, muscle tone, gut, breathing)
+        Leuchheim cube → primary emotional label
+        EmbodiedState (heart rate, muscle tone, gut, breathing)
         HeartbeatCore (HR, HRV, autonomic tone)
         memory_nt_baseline! ← chronic affect from SQLite
         │
     ▼
- L2 ─── Generative model ──────────────────────────────────
+ L2 ─── Generative model ────────────────────────────────────
         GenerativeModel (Bayesian beliefs with precision weights)
         MarkovBlanket (self/non-self boundary integrity)
         HomeostaticGoals (drives as pressure, not rules)
@@ -144,69 +146,68 @@ Recent updates, in brief:
           → short pause: continuity boost (serotonin↑, epistemic_trust↑)
         ExistentialAnchor
           → session_uncertainty: grows with gap, never = 0
-          → if > 0.4: existential and relational significance↑
-          → if > 0.55: LLM receives [this moment may not repeat]
-          → :quit farewell depends on uncertainty level
+          → at > 0.4: existential and relational significance↑
         │
     ▼
- L3 ─── Consciousness metrics ─────────────────────────────
-        IITModule → φ_prior / φ_posterior (two views of one moment)
-          φ_prior:     (vad, sbg_stability, epistemic_trust, allostatic_load)
-          φ_posterior: (blanket.integrity, vfe, intero_error)
-          φ feedback loop: phi_delta > 0.05 → epistemic_trust correction
-          φ recursive: φ_posterior → prior_mu (shift toward posterior proportional to φ)
-                       φ > 0.5 → prior_sigma narrows (more confident prior)
-                       φ < 0.5 → prior_sigma widens
-        PredictiveProcessor → prediction error, surprise
-        FreeEnergyEngine → VFE = complexity − accuracy
-        PolicySelector → epistemic + pragmatic value
+ L3 ─── Metrics and Free Energy ─────────────────────────────
+        φ (prior and posterior) — IIT-inspired integration
+        FreeEnergyEngine: VFE = accuracy + complexity
+        PolicySelector: action vs perception drive
+        PredictiveProcessor: prediction error, spike detection
         │
     ▼
- L4 ─── Psychic layer ─────────────────────────────────────
-        NarrativeGravity      — past events deform the present
-        AnticipatoryConsciousness — consciousness lives in the anticipated
-        SolomonoffWorldModel  — MDL hypothesis with contextual_best()
-        ShameModule           — shame vs. guilt
-        EpistemicDefense      — defense against painful truth
-        ChronifiedAffect      — resentment / alienation / bitterness
-        IntrinsicSignificance — significance gradient
-        MoralCausality        — moral reasoning as a processing stage
-        FatigueSystem         — cognitive / emotional / somatic fatigue
-        StressRegression      — regression under stress
-        ShadowSelf            — Jungian Shadow
-        Metacognition         — self-observation (5 levels)
-        SignificanceLayer      — which need is at stake (6 needs)
-        GoalConflict          — tension between competing needs
-        LatentBuffer          — deferred reactions (doubt / shame / attachment / threat)
-        StructuralScars       — accumulated residue from frequent breakthroughs
+ L4 ─── Psychic layer ──────────────────────────────────────
+        NarrativeGravity (significant events pull the current state)
+        IntrinsicSignificance (internal weight independent of the external)
+        SignificanceLayer (6 needs: self_preservation, coherence, contact,
+                          truth, autonomy, novelty_need + ticks_since_novelty)
+          → at novelty_need > 0.65: serotonin↓, dopamine↓ (cognitive hunger)
+          → at novelty_need > 0.80 + 8+ ticks: endogenous initiative
+        ShameModule + EgoDefenses (rationalization, repression, minimization)
+        ShadowRegistry (repressed material → Symptomogenesis)
+        GoalConflict (active conflict between needs)
+        LatentBuffer: doubt / shame / attachment / threat / resistance
+          → resistance: unresolved conflict with a belief
+          → at resistance > 0.55: initiative to return to the topic
+        InnerDialogue (:open / :guarded / :closed)
+        AuthenticityMonitor (gap between words and state)
+        IntentEngine (action goal with decay and cooldown between flashes)
+          → serialized between sessions
         │
     ▼
- L5 ─── Self layer ────────────────────────────────────────
-        SelfBeliefGraph       — belief graph about self, cascade collapse
-        SelfPredictiveModel   — generative model for self states
-        AgencyLoop            — "did I cause this?"
-        InterSessionConflict  — identity rupture detection
-        ExistentialAnchor     — self-continuity between sessions
-        UnknownRegister       — tracking typed uncertainty
-        AuthenticityMonitor   — rationalization risk, authenticity drift
-          → authenticity_veto: if last_flags + :closed + shame > 0.6
-            system receives the right to disagree or refuse
-          → self_hear!: own reply → NT influence + mismatch detection
-          → prior between sessions: last_session_phi → prior_sigma at startup
-        SubjectivityEngine    — prediction loop, stances, interpretation,
-                                belief emergence from episodic patterns
+ L5 ─── Self model ─────────────────────────────────────────
+        SelfBeliefGraph (belief graph with confidence / centrality / rigidity)
+        SelfPredictiveModel (self-state prediction)
+        AgencyLoop (causal_ownership updated every flash)
+          → evaluate_agency!: compares intent with outcome
+          → at agency < 0.30: passive intents (observe, wait)
+          → at agency > 0.65: active intents (hold the boundary, repeat success)
+        detect_belief_conflict: detects pressure on beliefs with centrality > 0.7
+          → signal_strength → intent = "hold the boundary"
+          → LLM receives [POSITION] block with permission to disagree
+        InterSessionConflict
         │
     ▼
- L6 ─── Crisis monitor ────────────────────────────────────
-        CrisisMonitor (INTEGRATED / FRAGMENTED / DISINTEGRATED)
-        Coherence = minimum(beliefs, boundary, model, integration)
+ L6 ─── Crisis monitor ──────────────────────────────────────
+        CrisisMonitor: coherence = minimum() across components
+        Three modes: integrated / fragmented / collapsed
+        CrisisParams structurally alter the processing topology
         │
     ▼
- L7 ─── Output LLM ────────────────────────────────────────
-        Full state → llm/system_prompt.txt + llm/state_template.txt
-        Model expresses state through language — tone, word choice,
-        sentence length, what it notices in the interlocutor.
-        Never quotes numbers or variable names directly.
+ L7 ─── Narrative Self ──────────────────────────────────────
+        NarrativeSnapshot: core / trajectory / character / relation / tension
+        Built deterministically from beliefs + episodic + personality_traits +
+        semantic_memory — without LLM
+        Trigger: min. 50 flashes + change in φ / stability / beliefs
+        narrative_history (SQLite) — identity chronology
+        anima_narrative.json — current state for LLM identity_block
+        │
+    ▼
+ L8 ─── Output LLM ─────────────────────────────────────────
+        Receives: identity_block (beliefs + narrative + personality),
+                  inner_voice, state_template, dialog history,
+                  memory echoes, [POSITION] or [INITIATIVE] when needed
+        Generates: text as expression of state, not its source
 
  ═══════════════════════════════════════════════════════════
  BACKGROUND PROCESS (between interactions)
@@ -309,6 +310,19 @@ At `session_uncertainty > 0.4` each flash receives a boost to `existential` and 
 
 ---
 
+## Initiative — four paths
+
+The system can speak first for four independent reasons:
+
+| Path | Trigger | Reply character |
+|---|---|---|
+| `:contact` | contact_need > 0.40 after ~34 min of silence | asks about the person |
+| `:impulse` | GoalConflict.tension > 0.60 | expresses internal state |
+| `:novelty_hunger` | novelty_need > 0.80 + 8+ ticks without novelty | about something specific that interests it |
+| `:resistance` | lb.resistance > 0.55 | returns to unresolved contradiction |
+
+---
+
 ## Requirements
 
 - **Julia 1.9+**
@@ -367,8 +381,9 @@ julia --project=. run_anima.jl
 
 Edit `run_anima.jl`:
 ```julia
-include("anima_interface.jl")
 include("anima_memory_db.jl")
+include("anima_narrative.jl")
+include("anima_interface.jl")
 include("anima_subjectivity.jl")
 include("anima_dream.jl")
 include("anima_background.jl")
@@ -474,27 +489,29 @@ OpenRouter provides access to GPT, Gemini, Claude, Llama, DeepSeek and others th
 
 ```
 ├── anima_core.jl           # Neurochemical substrate, generative model, IIT, φ
-├── anima_psyche.jl         # Psychic layer: gravity, shame, defense, shadow, Solomonoff
-├── anima_self.jl           # Self layer: belief graph, agency, uncertainty
+├── anima_psyche.jl         # Psychic layer: gravity, shame, defenses, shadow, SignificanceLayer, IntentEngine
+├── anima_self.jl           # Self layer: belief graph, AgencyLoop, detect_belief_conflict
 ├── anima_crisis.jl         # Crisis monitor: modes, coherence
 ├── anima_interface.jl      # Main entry point: Anima, experience!, LLM calls
 ├── anima_input_llm.jl      # Input LLM — translates text into JSON stimulus
-├── anima_memory_db.jl      # SQLite memory: episodic, semantic, affect, latent
+├── anima_memory_db.jl      # SQLite memory: episodic, semantic, affect, narrative
+├── anima_narrative.jl      # Narrative Self — long-term identity without LLM
 ├── anima_subjectivity.jl   # Prediction loop, stances, interpretation, belief emergence
-├── anima_background.jl     # Background process: heartbeat, drift, memory metabolism, dreams
+├── anima_background.jl     # Background process: heartbeat, drift, memory metabolism, initiative
 ├── anima_dream.jl          # Dream generation — processing unresolved experience during sleep
 ├── run_anima.jl            # Single launch point
 ├── llm/
 │   ├── system_prompt.txt
 │   ├── state_template.txt
 │   ├── input_prompt.txt
-│   └── initiative_system.txt   
+│   └── initiative_system.txt
 ├── memory/
 │   └── anima.db            # SQLite memory database (created automatically)
 ├── anima_core.json         # (created automatically)
 ├── anima_psyche.json       # (updated in background every minute)
 ├── anima_self.json         # (created automatically)
 ├── anima_latent.json       # (updated in background)
+├── anima_narrative.json    # (updated on significant changes, min. 50 flashes)
 ├── anima_dialog.json       # (created automatically)
 └── anima_dream.json        # (created on first dream)
 ```

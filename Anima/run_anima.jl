@@ -2,8 +2,9 @@ using Pkg
 Pkg.activate(@__DIR__)
 Pkg.instantiate()
 
-include("anima_interface.jl")
 include("anima_memory_db.jl")
+include("anima_narrative.jl")
+include("anima_interface.jl")
 include("anima_subjectivity.jl")
 include("anima_dream.jl")
 include("anima_background.jl")

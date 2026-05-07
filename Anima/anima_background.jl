@@ -147,6 +147,9 @@ const SELF_INITIATE_COOLDOWN_FLASHES = 100  # ~5 min at 3s/flash
 const SELF_INITIATE_CONFLICT_THR = 0.60   # GoalConflict.tension поріг для impulse
 const SELF_INITIATE_LB_DOMINANT_THR = 0.70 # домінуючий lb компонент для impulse
 const SELF_INITIATE_AGENCY_THR = 0.45     # мінімальний causal_ownership для impulse
+const NOVELTY_HUNGER_THR = 0.80           # novelty_need поріг для ендогенної ініціативи
+const NOVELTY_HUNGER_TICKS = 8            # мінімум slow_ticks без новизни (~8 хв)
+const RESISTANCE_LB_THR = 0.55           # lb.resistance поріг для ініціативи повернення до конфлікту
 
 # Аніма починає розмову сама — не тому що її запитали, а тому що накопилась пресія
 # або визрів внутрішній конфлікт
@@ -182,7 +185,16 @@ function _maybe_self_initiate!(
     is_pressure = lb_pressure >= SELF_INITIATE_PRESSURE_THR ||
                   contact_drive >= SELF_INITIATE_CONTACT_THR
 
-    !is_impulse && !is_pressure && return
+    # Шлях 3: ендогенний VFE-тиск — когнітивний голод без зовнішнього стимулу
+    # Умова: потреба в новизні критична + достатньо часу без нової інформації
+    is_novelty_hunger =
+        a.sig_layer.novelty_need >= NOVELTY_HUNGER_THR &&
+        a.sig_layer.ticks_since_novelty >= NOVELTY_HUNGER_TICKS
+
+    # Шлях 4: структурна опозиція — невирішений конфлікт з переконанням накопичився
+    is_resistance = a.latent_buffer.resistance >= RESISTANCE_LB_THR
+
+    !is_impulse && !is_pressure && !is_novelty_hunger && !is_resistance && return
 
     # Визначаємо dominant_type
     dominant_type = if is_impulse
@@ -198,6 +210,10 @@ function _maybe_self_initiate!(
         end
     elseif contact_drive >= SELF_INITIATE_CONTACT_THR && contact_drive >= lb_pressure
         :contact
+    elseif is_resistance
+        :resistance
+    elseif is_novelty_hunger
+        :novelty_hunger
     elseif lb.doubt >= lb.shame && lb.doubt >= lb.attachment && lb.doubt >= lb.threat
         :doubt
     elseif lb.shame >= lb.attachment && lb.shame >= lb.threat
@@ -220,6 +236,10 @@ function _maybe_self_initiate!(
 
     suffix = if dominant_type == :contact
         " — хочу знати як ти."
+    elseif dominant_type == :resistance
+        " — є щось що залишилось невирішеним між нами. Я не можу просто відпустити."
+    elseif dominant_type == :novelty_hunger
+        " — мені потрібно щось нове. Не розмова — а інформація, питання, ідея."
     elseif dominant_type == :doubt
         " — щось не дає мені спокою."
     elseif dominant_type == :shame
@@ -239,6 +259,13 @@ function _maybe_self_initiate!(
     end
     text = inner * suffix
 
+    # Після ініціативи скидаємо відповідний лічильник
+    if dominant_type == :novelty_hunger
+        a.sig_layer.ticks_since_novelty = 0
+    elseif dominant_type == :resistance
+        a.latent_buffer.resistance = clamp(a.latent_buffer.resistance - 0.3, 0.0, 1.0)
+    end
+
     a._last_self_msg_flash = a.flash_count
     signal = (
         inner_voice = text,
@@ -247,6 +274,7 @@ function _maybe_self_initiate!(
         contact = contact_drive,
         gc_tension = gc_tension,
         is_impulse = is_impulse,
+        novelty_need = a.sig_layer.novelty_need,
     )
     isready(initiative_ch) || put!(initiative_ch, signal)
 end
@@ -307,6 +335,17 @@ function psyche_slow_tick!(a::Anima)
     sl.novelty_need =
         clamp01(sl.novelty_need + (base_sl.novelty_need - sl.novelty_need) * bg_decay)
     sl.contact_need = clamp01(sl.contact_need + 0.003)
+
+    # Ендогенний VFE-тиск: когнітивний голод від браку новизни
+    # Лічильник росте кожен slow_tick незалежно від зовнішніх подій
+    sl.ticks_since_novelty += 1
+    if sl.novelty_need > 0.65
+        # Валенс дрейфує в негатив — система відчуває голод
+        hunger_intensity = (sl.novelty_need - 0.65) / 0.35  # 0..1 при 0.65..1.0
+        valence_drift = hunger_intensity * 0.008
+        a.nt.serotonin = clamp(a.nt.serotonin - valence_drift, 0.0, 1.0)
+        a.nt.dopamine = clamp(a.nt.dopamine - valence_drift * 0.5, 0.0, 1.0)
+    end
 
     # GoalConflict
     a.goal_conflict.tension = max(0.0, a.goal_conflict.tension - 0.008)
@@ -372,6 +411,12 @@ function _latent_pressure_effects!(a::Anima)
         delta = (lb.threat - 0.25) * 0.03
         a.sbg.epistemic_trust = clamp(a.sbg.epistemic_trust - delta, 0.0, 0.85)
         a.nt.noradrenaline = clamp(a.nt.noradrenaline + delta * 0.5, 0.0, 1.0)
+    end
+
+    # resistance → повільний decay; при високому рівні D зростає (позиція потребує сили)
+    if lb.resistance > 0.1
+        lb.resistance = clamp(lb.resistance - 0.015, 0.0, 1.0)
+        a.nt.dopamine = clamp(a.nt.dopamine + lb.resistance * 0.02, 0.0, 1.0)
     end
 
     nothing
@@ -657,6 +702,15 @@ function _psyche_accumulated_drift!(a::Anima, n_ticks::Int)
         clamp01(base_sl.autonomy_need + (sl.autonomy_need - base_sl.autonomy_need) * cpd_sl)
     sl.novelty_need =
         clamp01(base_sl.novelty_need + (sl.novelty_need - base_sl.novelty_need) * cpd_sl)
+
+    # Когнітивний голод накопичується за час відсутності
+    sl.ticks_since_novelty += n_ticks
+    if sl.novelty_need > 0.65
+        hunger_intensity = (sl.novelty_need - 0.65) / 0.35
+        valence_drift = hunger_intensity * 0.008 * min(n_ticks, 30)
+        a.nt.serotonin = clamp(a.nt.serotonin - valence_drift, 0.0, 1.0)
+        a.nt.dopamine = clamp(a.nt.dopamine - valence_drift * 0.5, 0.0, 1.0)
+    end
 
     # LatentBuffer → накопичений вплив за n_ticks (compound, одноразово)
     # Той самий каузальний ланцюг що і в slow_tick, але за весь gap одразу
@@ -1060,11 +1114,23 @@ function repl_with_background!(
             # Ініціатива: накопичений тиск або внутрішній імпульс
             if isready(bg.initiative_channel) && isnothing(pending_llm)
                 sig = take!(bg.initiative_channel)
-                _imp_label = get(sig, :is_impulse, false) ? "IMPULSE" : "pressure"
+                _imp_label = if get(sig, :is_impulse, false)
+                    "IMPULSE"
+                elseif get(sig, :dominant, :pressure) == :novelty_hunger
+                    "NOVELTY"
+                elseif get(sig, :dominant, :pressure) == :resistance
+                    "RESISTANCE"
+                else
+                    "pressure"
+                end
                 _gc = round(get(sig, :gc_tension, 0.0), digits=2)
                 println("\n  [INITIATIVE/$(_imp_label)] $(sig.dominant) | contact=$(round(sig.contact,digits=2)) gc=$(_gc)")
                 dominant_note = if sig.dominant == :contact
                     "Аніма хоче знати як справи людина. Запитай щось про нього або його життя."
+                elseif sig.dominant == :resistance
+        "Аніма повертається до невирішеного протиріччя. Не атакує — але і не відступає. Одна фраза що утримує позицію: тихо, але чітко."
+    elseif sig.dominant == :novelty_hunger
+                    "Аніма відчуває когнітивний голод — їй потрібна нова інформація, ідея або питання. Не про людину — про щось що цікаво їй самій зараз. Конкретно: явище, питання, здогад. Не загально."
                 elseif sig.dominant == :doubt
                     "Аніма внутрішньо сумнівається, щось невирішене. Вислови це як питання або сумнів."
                 elseif sig.dominant == :shame
@@ -1118,7 +1184,7 @@ $(_ini_identity)$(_ini_memory)
 INTERNAL STATE:
 $(sig.inner_voice)
 
-DRIVE: $(sig.dominant)$(get(sig, :is_impulse, false) ? " [внутрішній імпульс]" : "")
+DRIVE: $(sig.dominant)$(get(sig, :is_impulse, false) ? " [внутрішній імпульс]" : "")$(sig.dominant == :novelty_hunger ? " [novelty=$(round(get(sig,:novelty_need,0.0),digits=2)), ticks=$(a.sig_layer.ticks_since_novelty)]" : "")
 $(dominant_note)"""
 
                 pending_llm = llm_async(
@@ -1383,7 +1449,8 @@ $(dominant_note)"""
                 end
 
                 a._last_user_flash = a.flash_count
-                r = experience!(a, stim; user_message = cmd)
+                a.sig_layer.ticks_since_novelty = 0   # новий зовнішній стимул — голод скидається
+                r = experience!(a, stim; user_message = cmd, mem = mem)
                 dialog_to_belief_signal!(a.sbg, cmd, a.flash_count)
                 # Genuine Dialogue: детекція уникнутих тем
                 # Якщо система закрита під час розмови — тема обходиться стороною

@@ -69,6 +69,7 @@ function MemoryDB(db_path::String = joinpath("memory", "anima.db"))
     db = SQLite.DB(db_path)
     SQLite.busy_timeout(db, 5000)
     _init_schema!(db)
+    ensure_narrative_table!(db)
 
     mem = MemoryDB(
         db,

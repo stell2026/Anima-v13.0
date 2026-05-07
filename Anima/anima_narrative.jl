@@ -1,5 +1,5 @@
 # A N I M A - narrative (Julia)
-
+#
 # Long-term narrative self — хто Аніма є зараз на основі накопиченого досвіду.
 # Без LLM: детерміновано з beliefs, episodic, personality_traits, semantic_memory.
 # Оновлюється за тригером (зміни > порогу), не за розкладом.

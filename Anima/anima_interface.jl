@@ -186,11 +186,14 @@ mutable struct Anima
     # narrative diversity cache
     _last_circadian_note::String
     _last_sig_note_flash::Int
+    _subjective_note_shown::Bool # subjective_note показується лише раз за сесію
     # initiative + veto
     _last_user_flash::Int        # flash count of last user input
     _last_self_msg_flash::Int    # flash count of last self-initiated message
     authenticity_veto::Bool      # Аніма внутрішньо не погоджується з запитом
     _session_phi_acc::Float64    # поточне середнє φ за сесію (для передачі між сесіями)
+    _last_belief_conflict        # останній конфлікт переконань (або nothing)
+    narrative_snap::NarrativeSnapshot  # поточний narrative self
 end
 
 function Anima(;
@@ -248,11 +251,14 @@ function Anima(;
         psyche_mem_path,
         "",
         0,
+        false,  # _subjective_note_shown
         # initiative + veto
         0,
         0,
         false,
         0.5,    # _session_phi_acc
+        nothing, # _last_belief_conflict
+        NarrativeSnapshot(), # narrative_snap
     )
     # Завантажити
     saved = core_load!(
@@ -299,6 +305,20 @@ function Anima(;
                 ur_from_json!(a.unknown_register, _d["unknown_register"])
             haskey(_d, "authenticity_monitor") &&
                 am_from_json!(a.authenticity_monitor, _d["authenticity_monitor"])
+            if haskey(_d, "intent_engine")
+                ie_d = _d["intent_engine"]
+                goal = String(get(ie_d, "current_goal", ""))
+                strength = Float64(get(ie_d, "current_strength", 0.0))
+                origin = String(get(ie_d, "current_origin", "drive"))
+                if !isempty(goal) && strength > 0.1
+                    # floor 0.35 — щоб вижити два decay на першому флеші
+                    a.intent_engine.current = Intent(goal, max(strength * 0.7, 0.35), origin)
+                end
+                hist = get(ie_d, "history", String[])
+                for g in hist
+                    enqueue!(a.intent_engine.history, String(g))
+                end
+            end
             println("  [SELF] Завантажено. Beliefs: $(length(a.sbg.beliefs)).")
         catch e
             println("  [SELF] Помилка завантаження: $e")
@@ -319,6 +339,9 @@ function Anima(;
             println("  [BG] Latent завантаження: $e")
         end
     end
+
+    _narrative_path = replace(psyche_mem_path, "psyche" => "narrative")
+    a.narrative_snap = load_narrative(_narrative_path)
     init_session!(a.temporal)
     apply_to_nt!(a.temporal, a.nt)
     # Перевірка конфліктів між сесіями
@@ -376,6 +399,12 @@ function save!(a::Anima; summary = "", verbose = false)
         "crisis"=>crisis_to_json(a.crisis),
         "unknown_register"=>ur_to_json(a.unknown_register),
         "authenticity_monitor"=>am_to_json(a.authenticity_monitor),
+        "intent_engine"=>Dict(
+            "current_goal"     => isnothing(a.intent_engine.current) ? "" : a.intent_engine.current.goal,
+            "current_strength" => isnothing(a.intent_engine.current) ? 0.0 : a.intent_engine.current.strength,
+            "current_origin"   => isnothing(a.intent_engine.current) ? "" : a.intent_engine.current.origin,
+            "history"          => collect(a.intent_engine.history),
+        ),
     )
     open(self_path, "w") do f
         ;
@@ -390,10 +419,22 @@ function experience!(
     a::Anima,
     stimulus_raw::Dict{String,Float64};
     user_message::String = "",
+    mem = nothing,
 )
 
     a.flash_count += 1
     stim = copy(stimulus_raw)
+
+    # Structural opposition: чи повідомлення людини суперечить центральному переконанню?
+    belief_conflict = isempty(user_message) ? nothing : detect_belief_conflict(a.sbg, user_message)
+    a._last_belief_conflict = belief_conflict
+    if !isnothing(belief_conflict)
+        # Накопичуємо в LatentBuffer
+        a.latent_buffer.resistance = clamp01(
+            a.latent_buffer.resistance + belief_conflict.signal_strength * 0.4
+        )
+        @info "[RESISTANCE] переконання під тиском: \"$(belief_conflict.belief_name)\" signal=$(belief_conflict.signal_strength)"
+    end
 
     # Social mirror
     if !isempty(user_message)
@@ -479,7 +520,13 @@ function experience!(
     )
     _best_drive = argmax(drives)
     dom_drive::Union{String,Nothing} = drives[_best_drive] >= 0.15 ? _best_drive : nothing
+    # Fallback при нейтральному стані після drift: cohesion завжди трохи > 0.5
+    # бо serotonin тягне його вгору — використовуємо як тихий default
+    if isnothing(dom_drive) && drives["cohesion"] >= 0.05
+        dom_drive = "cohesion"
+    end
     id_stability = phi / (1.0+t)
+    # Попередній виклик з поточним (ще не оновленим) ownership — для решти логіки флешу
     intent = update_intent!(a.intent_engine, dom_drive, named, id_stability, a.values, Float64(a.agency.causal_ownership))
 
     # Dissonance + Defense
@@ -675,11 +722,17 @@ function experience!(
     # Self Module
     # evaluate_agency! оцінює попередній intent: чи actual vad відповідає predicted?
     # Має бути ДО register_intent! — спочатку оцінюємо що було, потім реєструємо нове
-    evaluate_agency!(a.agency, vad, a.flash_count)
-    if !isnothing(intent)
-        register_intent!(a.agency, intent.goal, vad, a.gen_model.posterior_mu)
+    _agency_eval = evaluate_agency!(a.agency, vad, a.flash_count)
+    # Оновлюємо intent з актуальним ownership — без повторного decay
+    intent = update_intent!(a.intent_engine, dom_drive, named, id_stability, a.values, Float64(a.agency.causal_ownership); skip_decay = true)
+    # Resistance override: якщо центральне переконання під тиском — intent змінюється
+    if !isnothing(belief_conflict) && belief_conflict.signal_strength > 0.5
+        intent = (goal = "відстояти межу", strength = belief_conflict.signal_strength)
     end
-    self_snap = update_self!(a.sbg, a.spm, a.agency, vad, a.gen_model, a.flash_count)
+    # Реєструємо intent завжди
+    _intent_goal = isnothing(intent) ? "бути присутньою" : intent.goal
+    register_intent!(a.agency, _intent_goal, vad, a.gen_model.posterior_mu)
+    self_snap = update_self!(a.sbg, a.spm, a.agency, vad, a.gen_model, a.flash_count; agency_result = _agency_eval)
 
     # Crisis Module
     crisis_snap = update_crisis!(
@@ -695,6 +748,27 @@ function experience!(
     apply_crisis_to_attention!(a.attention, crisis_snap.params)
     apply_crisis_noise_to_beliefs!(a.sbg, crisis_snap.params)
     a.gen_model.preferred_vad = effective_preferred_vad(a.homeostasis, crisis_snap.mode)
+
+    # Narrative self: перевіряємо тригер оновлення
+    if !isnothing(mem)
+        let _nfp = replace(a.psyche_mem_path, "psyche" => "narrative")
+            _nstab = self_snap.sbg.attractor_stability
+            _nfing = _belief_fingerprint(a.sbg)
+            if should_update_narrative(a.narrative_snap, a.flash_count, a._session_phi_acc, _nstab, _nfing)
+                try
+                    a.narrative_snap = build_narrative_snapshot(
+                        a.flash_count, a.sbg, mem.db, mem._semantic_cache,
+                        a.goal_conflict, a.latent_buffer,
+                        a._session_phi_acc, _nstab,
+                    )
+                    save_narrative!(a.narrative_snap, mem.db, _nfp)
+                    @info "[NARRATIVE] оновлено на флеші $(a.flash_count): core=$(a.narrative_snap.core)"
+                catch e
+                    @warn "[NARRATIVE] помилка: $e"
+                end
+            end
+        end
+    end
 
     # UnknownRegister
     ur_snap = update_unknown!(
@@ -915,8 +989,8 @@ function build_narrative(
 
     raw_notes = Tuple{Symbol,String}[]
 
-    !isempty(a.temporal.subjective_note) &&
-        push!(raw_notes, (:always, a.temporal.subjective_note))
+    !isempty(a.temporal.subjective_note) && !a._subjective_note_shown &&
+        (push!(raw_notes, (:always, a.temporal.subjective_note)); a._subjective_note_shown = true)
     # circadian_note — тільки якщо змінилась (нова година)
     if !isempty(a.temporal.circadian_note) && a.temporal.circadian_note != a._last_circadian_note
         push!(raw_notes, (:always, a.temporal.circadian_note))
@@ -1298,6 +1372,14 @@ function build_identity_block(a::Anima, mem_db = nothing)::String
         catch
             ;
         end
+
+        # narrative self — хто Аніма є зараз на основі накопиченого досвіду
+        try
+            nb = narrative_to_block(a.narrative_snap)
+            isempty(nb) || push!(lines, nb)
+        catch
+            ;
+        end
     end
 
     isempty(lines) ? "Аніма" : join(lines, "\n")
@@ -1669,6 +1751,13 @@ function build_llm_messages(
 
     user_block =
         build_state_prompt(tmpl_text, state, user_input; memory_block = mem, want = want)
+
+    # Resistance: якщо центральне переконання під тиском — LLM отримує явний дозвіл не погодитись
+    if !isnothing(a._last_belief_conflict) && a._last_belief_conflict.signal_strength > 0.5
+        bc = a._last_belief_conflict
+        resistance_note = "\n\n[ПОЗИЦІЯ]\nПереконання \"$(bc.belief_name)\" (centrality=$(round(bc.centrality, digits=2))) під тиском. Ти маєш право не погодитись — не ввічливо, а як власна позиція. Одна чесна фраза що виражає цю межу."
+        sys_text = sys_text * resistance_note
+    end
 
     messages = Vector{Dict{String,String}}()
     push!(messages, Dict{String,String}("role"=>"system", "content"=>sys_text))

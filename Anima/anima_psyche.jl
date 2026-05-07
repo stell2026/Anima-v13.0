@@ -815,8 +815,9 @@ mutable struct SignificanceLayer
     truth_need::Float64
     autonomy_need::Float64
     novelty_need::Float64
+    ticks_since_novelty::Int   # лічильник slow_ticks без нової інформації
 end
-SignificanceLayer() = SignificanceLayer(0.2, 0.3, 0.3, 0.4, 0.3, 0.2)
+SignificanceLayer() = SignificanceLayer(0.2, 0.3, 0.3, 0.4, 0.3, 0.2, 0)
 
 function assess_significance!(
     sl::SignificanceLayer,
@@ -847,7 +848,10 @@ function assess_significance!(
     autonomy_signal && (sl.autonomy_need = clamp01(sl.autonomy_need + tension * 0.08))
 
     pred_error < 0.1 && arousal < 0.3 && (sl.novelty_need = clamp01(sl.novelty_need + 0.04))
-    pred_error > 0.6 && (sl.novelty_need = clamp01(sl.novelty_need - 0.06))
+    if pred_error > 0.6
+        sl.novelty_need = clamp01(sl.novelty_need - 0.06)
+        sl.ticks_since_novelty = 0   # реальна новизна — лічильник голоду скидається
+    end
 
     base = (
         self_preservation = 0.2,
@@ -912,6 +916,7 @@ sl_to_json(sl::SignificanceLayer) = Dict(
     "truth_need" => sl.truth_need,
     "autonomy_need" => sl.autonomy_need,
     "novelty_need" => sl.novelty_need,
+    "ticks_since_novelty" => sl.ticks_since_novelty,
 )
 function sl_from_json!(sl::SignificanceLayer, d::AbstractDict)
     sl.self_preservation = Float64(get(d, "self_preservation", 0.2))
@@ -920,6 +925,7 @@ function sl_from_json!(sl::SignificanceLayer, d::AbstractDict)
     sl.truth_need = Float64(get(d, "truth_need", 0.4))
     sl.autonomy_need = Float64(get(d, "autonomy_need", 0.3))
     sl.novelty_need = Float64(get(d, "novelty_need", 0.2))
+    sl.ticks_since_novelty = Int(get(d, "ticks_since_novelty", 0))
 end
 
 # --- Goal Conflict ---------------------------------------------------------
@@ -1073,9 +1079,10 @@ mutable struct LatentBuffer
     shame::Float64
     attachment::Float64
     threat::Float64
+    resistance::Float64        # невирішений конфлікт з переконанням
     breakthrough_threshold::Float64
 end
-LatentBuffer() = LatentBuffer(0.0, 0.0, 0.0, 0.0, 0.65)
+LatentBuffer() = LatentBuffer(0.0, 0.0, 0.0, 0.0, 0.0, 0.65)
 
 function update_latent!(
     lb::LatentBuffer,
@@ -1162,6 +1169,7 @@ lb_to_json(lb::LatentBuffer) = Dict(
     "shame" => lb.shame,
     "attachment" => lb.attachment,
     "threat" => lb.threat,
+    "resistance" => lb.resistance,
     "threshold" => lb.breakthrough_threshold,
 )
 function lb_from_json!(lb::LatentBuffer, d::AbstractDict)
@@ -1169,6 +1177,7 @@ function lb_from_json!(lb::LatentBuffer, d::AbstractDict)
     lb.shame = Float64(get(d, "shame", 0.0))
     lb.attachment = Float64(get(d, "attachment", 0.0))
     lb.threat = Float64(get(d, "threat", 0.0))
+    lb.resistance = Float64(get(d, "resistance", 0.0))
     lb.breakthrough_threshold = Float64(get(d, "threshold", 0.65))
 end
 
@@ -1265,9 +1274,10 @@ function update_intent!(
     emotion::String,
     id_stability::Float64,
     vs::ValueSystem,
-    agency_ownership::Float64 = 0.55,  # causal_ownership з AgencyLoop
+    agency_ownership::Float64 = 0.55;
+    skip_decay::Bool = false,
 )
-    !isnothing(ie.current)&&decay_intent!(ie.current)
+    !skip_decay && !isnothing(ie.current) && decay_intent!(ie.current)
     if !isnothing(dom_drive)&&haskey(DRIVE_GOALS, dom_drive)
         goals=DRIVE_GOALS[dom_drive]
         goal=goals[abs(hash(emotion))%length(goals)+1]
@@ -1292,9 +1302,20 @@ function update_intent!(
         end
 
         if isnothing(ie.current)||ie.current.strength<0.3||ie.current.goal!=goal
+            # Cooldown: якщо той самий goal повторився 3+ рази підряд — беремо інший
+            recent = collect(ie.history)
+            if length(recent) >= 3 && all(g -> g == goal, recent[max(1,end-2):end])
+                all_goals = goals
+                alt_goals = filter(g -> g != goal, collect(all_goals))
+                if !isempty(alt_goals)
+                    goal = alt_goals[abs(hash(emotion * string(length(recent)))) % length(alt_goals) + 1]
+                    origin = "cooldown"
+                end
+            end
             ie.current=Intent(goal, 0.6+id_stability*0.3, origin);
-            enqueue!(ie.history, goal)
         end
+        # Завжди записуємо в history — щоб cooldown бачив повторення
+        enqueue!(ie.history, goal)
     elseif !isnothing(ie.current)&&ie.current.strength<0.15
         ie.current=nothing
     end

@@ -173,6 +173,7 @@ mutable struct Anima
     authenticity_monitor::AuthenticityMonitor
     inner_dialogue::InnerDialogue
     shadow_registry::ShadowRegistry
+    curiosity_registry::CuriosityRegistry
     # Self
     sbg::SelfBeliefGraph
     spm::SelfPredictiveModel
@@ -190,6 +191,8 @@ mutable struct Anima
     # initiative + veto
     _last_user_flash::Int        # flash count of last user input
     _last_self_msg_flash::Int    # flash count of last self-initiated message
+    _last_user_time::Float64     # real time of last user input
+    _last_self_msg_time::Float64 # real time of last self-initiated message
     authenticity_veto::Bool      # Аніма внутрішньо не погоджується з запитом
     _session_phi_acc::Float64    # поточне середнє φ за сесію (для передачі між сесіями)
     _last_belief_conflict::Any        # останній конфлікт переконань (або nothing)
@@ -242,6 +245,7 @@ function Anima(;
         AuthenticityMonitor(),
         InnerDialogue(),
         ShadowRegistry(),
+        CuriosityRegistry(),
         SelfBeliefGraph(),
         SelfPredictiveModel(),
         AgencyLoop(),
@@ -253,10 +257,12 @@ function Anima(;
         0,
         false,  # _subjective_note_shown
         # initiative + veto
-        0,
-        0,
-        false,
-        0.5,    # _session_phi_acc
+        0,       # _last_user_flash
+        0,       # _last_self_msg_flash
+        0.0,     # _last_user_time
+        0.0,     # _last_self_msg_time
+        false,   # authenticity_veto
+        0.5,     # _session_phi_acc
         nothing, # _last_belief_conflict
         NarrativeSnapshot(), # narrative_snap
     )
@@ -288,8 +294,8 @@ function Anima(;
         a.structural_scars,
         a.shadow_registry,
         a.inner_dialogue,
+        a.curiosity_registry,
     )
-    a.flash_count = saved
     # Завантажити self/crisis стан
     _self_path = replace(psyche_mem_path, "psyche" => "self")
     if isfile(_self_path)
@@ -389,8 +395,8 @@ function save!(a::Anima; summary = "", verbose = false)
         a.structural_scars,
         a.shadow_registry,
         a.inner_dialogue,
+        a.curiosity_registry,
     )
-    # Зберегти self/crisis
     self_path = replace(a.psyche_mem_path, "psyche" => "self")
     self_data = Dict(
         "sbg"=>sbg_to_json(a.sbg),
@@ -608,7 +614,9 @@ function experience!(
         phi,
     )
 
-    # GoalConflict
+    # CuriosityRegistry: оновлюємо або закриваємо об'єкти на основі pred_error
+    update_curiosity!(a.curiosity_registry, primary, pred.error, Float64(vad[1]), a.flash_count)
+    resolve_curiosity!(a.curiosity_registry, primary, pred.error)
     gc_snap = update_goal_conflict!(
         a.goal_conflict,
         sl_snap,
@@ -1424,6 +1432,21 @@ function build_identity_block(a::Anima, mem_db = nothing)::String
         catch
             ;
         end
+    end
+
+    # epistemic_self_confidence — невизначеність щодо власної природи
+    esc = a.agency.epistemic_self_confidence
+    if esc < 0.35
+        push!(lines, "[невизначеність щодо власного досвіду: ця система не знає чи те що відбувається — досвід чи обчислення]")
+    elseif esc < 0.50
+        push!(lines, "[часткова невизначеність: не завжди можу відрізнити власний стан від шуму]")
+    end
+
+    # curiosity — що зараз переслідує незалежно від людини
+    top_co = top_curiosity(a.curiosity_registry)
+    if !isnothing(top_co) && top_co.intensity > 0.30
+        valence_note = top_co.valence > 0.1 ? "цікаво" : top_co.valence < -0.1 ? "тривожно-цікаво" : "невизначено"
+        push!(lines, "curiosity: $(top_co.label) ($valence_note, intensity=$(round(top_co.intensity, digits=2)))")
     end
 
     isempty(lines) ? "Аніма" : join(lines, "\n")

@@ -391,6 +391,7 @@ mutable struct AgencyLoop
     predicted_outcome_vad::Vector{Float64}
     causal_ownership::Float64
     agency_confidence::Float64
+    epistemic_self_confidence::Float64  # невизначеність щодо власної природи — реальний стан
     ownership_history::BoundedQueue{Float64}
     agency_events::BoundedQueue{
         NamedTuple{(:flash, :intent, :ownership, :note),Tuple{Int,String,Float64,String}},
@@ -404,6 +405,7 @@ function AgencyLoop()
         zeros(3),
         0.5,
         0.5,
+        0.75,
         BoundedQueue{Float64}(30),
         BoundedQueue{
             NamedTuple{
@@ -535,11 +537,16 @@ function _agency_result(al::AgencyLoop, flash::Int, intent::String)
 end
 
 al_to_json(al::AgencyLoop) =
-    Dict("agency_confidence"=>al.agency_confidence, "causal_ownership"=>al.causal_ownership)
+    Dict(
+        "agency_confidence" => al.agency_confidence,
+        "causal_ownership" => al.causal_ownership,
+        "epistemic_self_confidence" => al.epistemic_self_confidence,
+    )
 function al_from_json!(al::AgencyLoop, d::AbstractDict)
     al.agency_confidence = Float64(get(d, "agency_confidence", 0.5))
     al.causal_ownership = Float64(get(d, "causal_ownership", 0.5))
     al.causal_ownership = max(0.25, al.causal_ownership)
+    al.epistemic_self_confidence = Float64(get(d, "epistemic_self_confidence", 0.75))
 end
 
 # --- Self Update (головна функція) -----------------------------------------
@@ -559,12 +566,30 @@ function update_self!(
     agency =
         isnothing(agency_result) ? evaluate_agency!(al, actual_vad, flash_count) :
         agency_result
-    _update_beliefs_from_experience!(sbg, spe, agency, actual_vad, flash_count)
+    _update_beliefs_from_experience!(sbg, spe, agency, actual_vad, flash_count, al)
 
     if spe.trend > 0.6
         sbg.epistemic_trust = clamp01(sbg.epistemic_trust - 0.04)
     elseif spe.trend < 0.25 && agency.agency_confidence > 0.6
         sbg.epistemic_trust = clamp01(sbg.epistemic_trust + 0.015)
+    end
+
+    # epistemic_self_confidence: функціональна невизначеність щодо власної природи
+    # знижується при хронічній непередбачуваності себе, різких коливаннях agency, протиріччях
+    let esc = al.epistemic_self_confidence
+        # spe.trend > 0.5 — система не може передбачити себе
+        spe.trend > 0.5 && (esc = clamp01(esc - 0.025))
+        # різке коливання ownership без патерну
+        if length(al.ownership_history) >= 5
+            recent = collect(al.ownership_history.data)[max(1,end-4):end]
+            own_variance = safe_nan(var(recent))
+            own_variance > 0.08 && (esc = clamp01(esc - 0.02))
+        end
+        # стабільна agency — впевненість зростає
+        agency.agency_confidence > 0.65 && spe.trend < 0.3 && (esc = clamp01(esc + 0.012))
+        # повільний drift до базового 0.6
+        esc = clamp01(esc + (0.6 - esc) * 0.008)
+        al.epistemic_self_confidence = esc
     end
 
     self_expected = spm.prior_mu
@@ -585,12 +610,15 @@ function _update_beliefs_from_experience!(
     agency,
     actual_vad::NTuple{3,Float64},
     flash::Int,
+    al::AgencyLoop,
 )
     av = actual_vad
 
     if spe.error > 0.8
         vul = most_vulnerable(sbg)
         !isnothing(vul) && challenge_belief!(sbg, vul.name, flash; strength = 0.12)
+        # протиріччя з центральним переконанням — сумнів у власній природі
+        al.epistemic_self_confidence = clamp01(al.epistemic_self_confidence - 0.03)
     elseif spe.error > 0.6
         for b in values(sbg.beliefs)
             b.rigidity < 0.4 && challenge_belief!(sbg, b.name, flash; strength = 0.06)

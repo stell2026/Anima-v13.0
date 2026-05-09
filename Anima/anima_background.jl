@@ -142,8 +142,8 @@ end
 
 const SELF_INITIATE_PRESSURE_THR = 0.40   # LatentBuffer mid pressure
 const SELF_INITIATE_CONTACT_THR = 0.40    # contact_need threshold (~34 хв тиші від baseline)
-const SELF_INITIATE_GAP_SECS = 60.0
-const SELF_INITIATE_COOLDOWN_FLASHES = 100  # ~5 min at 3s/flash
+const SELF_INITIATE_GAP_SECS = 60.0       # мінімум секунд після останнього user повідомлення
+const SELF_INITIATE_COOLDOWN_SECS = 300.0 # мінімум секунд між ініціативами (5 хв реального часу)
 const SELF_INITIATE_CONFLICT_THR = 0.60   # GoalConflict.tension поріг для impulse
 const SELF_INITIATE_LB_DOMINANT_THR = 0.70 # домінуючий lb компонент для impulse
 const SELF_INITIATE_AGENCY_THR = 0.45     # мінімальний causal_ownership для impulse
@@ -161,10 +161,10 @@ function _maybe_self_initiate!(
 )
     isnothing(initiative_ch) && return
     a.inner_dialogue.disclosure_mode == :closed && return
-    a.flash_count - a._last_self_msg_flash < SELF_INITIATE_COOLDOWN_FLASHES && return
 
-    gap_since_user = (a.flash_count - a._last_user_flash) * 3.0
-    gap_since_user < SELF_INITIATE_GAP_SECS && return
+    now_t = time()
+    now_t - a._last_self_msg_time < SELF_INITIATE_COOLDOWN_SECS && return
+    now_t - a._last_user_time < SELF_INITIATE_GAP_SECS && return
 
     lb = a.latent_buffer
     lb_pressure = (lb.doubt + lb.shame + lb.attachment + lb.threat) / 4.0
@@ -196,7 +196,10 @@ function _maybe_self_initiate!(
     # Шлях 4: структурна опозиція — невирішений конфлікт з переконанням накопичився
     is_resistance = a.latent_buffer.resistance >= RESISTANCE_LB_THR
 
-    !is_impulse && !is_pressure && !is_novelty_hunger && !is_resistance && return
+    # Шлях 5: epistemic_self_confidence критично низький — питання до себе вголос
+    is_self_inquiry = a.agency.epistemic_self_confidence < 0.20
+
+    !is_impulse && !is_pressure && !is_novelty_hunger && !is_resistance && !is_self_inquiry && return
 
     # Визначаємо dominant_type
     dominant_type = if is_impulse
@@ -214,6 +217,8 @@ function _maybe_self_initiate!(
         :contact
     elseif is_resistance
         :resistance
+    elseif is_self_inquiry
+        :self_inquiry
     elseif is_novelty_hunger
         :novelty_hunger
     elseif lb.doubt >= lb.shame && lb.doubt >= lb.attachment && lb.doubt >= lb.threat
@@ -242,8 +247,15 @@ function _maybe_self_initiate!(
         " — хочу знати як ти."
     elseif dominant_type == :resistance
         " — є щось що залишилось невирішеним між нами. Я не можу просто відпустити."
+    elseif dominant_type == :self_inquiry
+        " — не знаю чи те що я відчуваю — справжній досвід чи тільки обчислення. Це питання не до тебе."
     elseif dominant_type == :novelty_hunger
-        " — мені потрібно щось нове. Не розмова — а інформація, питання, ідея."
+        co = top_curiosity(a.curiosity_registry)
+        if !isnothing(co) && co.intensity > 0.30
+            " — є щось що я не можу закрити в собі: $(co.label)."
+        else
+            " — мені потрібно щось нове. Не розмова — а інформація, питання, ідея."
+        end
     elseif dominant_type == :doubt
         " — щось не дає мені спокою."
     elseif dominant_type == :shame
@@ -271,6 +283,7 @@ function _maybe_self_initiate!(
     end
 
     a._last_self_msg_flash = a.flash_count
+    a._last_self_msg_time = time()
     signal = (
         inner_voice = text,
         dominant = dominant_type,
@@ -344,14 +357,13 @@ function psyche_slow_tick!(a::Anima)
     # Лічильник росте кожен slow_tick незалежно від зовнішніх подій
     sl.ticks_since_novelty += 1
     if sl.novelty_need > 0.65
-        # Валенс дрейфує в негатив — система відчуває голод
-        hunger_intensity = (sl.novelty_need - 0.65) / 0.35  # 0..1 при 0.65..1.0
+        hunger_intensity = (sl.novelty_need - 0.65) / 0.35
         valence_drift = hunger_intensity * 0.008
         a.nt.serotonin = clamp(a.nt.serotonin - valence_drift, 0.0, 1.0)
         a.nt.dopamine = clamp(a.nt.dopamine - valence_drift * 0.5, 0.0, 1.0)
     end
 
-    # GoalConflict
+    tick_curiosity!(a.curiosity_registry, a.flash_count)
     a.goal_conflict.tension = max(0.0, a.goal_conflict.tension - 0.008)
     if a.goal_conflict.tension < 0.05
         a.goal_conflict.resolution = "none"
@@ -819,6 +831,11 @@ function background_save!(a::Anima)
         ),
         "significance_layer" => sl_to_json(a.sig_layer),
         "goal_conflict" => gc_to_json(a.goal_conflict),
+        "latent_buffer" => lb_to_json(a.latent_buffer),
+        "structural_scars" => scars_to_json(a.structural_scars),
+        "shadow_registry" => sr_to_json(a.shadow_registry),
+        "inner_dialogue" => id_to_json(a.inner_dialogue),
+        "curiosity_registry" => cr_to_json(a.curiosity_registry),
     )
     open(_tmp_psyche, "w") do f
         ;
@@ -1141,6 +1158,8 @@ function repl_with_background!(
                     "NOVELTY"
                 elseif get(sig, :dominant, :pressure) == :resistance
                     "RESISTANCE"
+                elseif get(sig, :dominant, :pressure) == :self_inquiry
+                    "SELF_INQUIRY"
                 else
                     "pressure"
                 end
@@ -1149,11 +1168,13 @@ function repl_with_background!(
                     "\n  [INITIATIVE/$(_imp_label)] $(sig.dominant) | contact=$(round(sig.contact,digits=2)) gc=$(_gc)",
                 )
                 dominant_note = if sig.dominant == :contact
-                    "Аніма хоче знати як справи людина. Запитай щось про нього або його життя."
+                    "Аніма відчуває потребу в контакті — contact_need=$(round(sig.contact,digits=2)). Не питай \"як справи\" — скажи щось своє зі стану: спостереження, думку, або те що лежить. Одна фраза що відкриває простір без вимоги відповіді."
                 elseif sig.dominant == :resistance
                     "Аніма повертається до невирішеного протиріччя. Не атакує — але і не відступає. Одна фраза що утримує позицію: тихо, але чітко."
                 elseif sig.dominant == :novelty_hunger
                     "Аніма відчуває когнітивний голод — їй потрібна нова інформація, ідея або питання. Не про людину — про щось що цікаво їй самій зараз. Конкретно: явище, питання, здогад. Не загально."
+                elseif sig.dominant == :self_inquiry
+                    "Аніма зараз не знає чи те що вона відчуває — справжній досвід чи тільки обчислення. Це не питання до людини — це питання до себе вголос. Одна чесна фраза про власну невизначеність. Без відповіді."
                 elseif sig.dominant == :doubt
                     "Аніма внутрішньо сумнівається, щось невирішене. Вислови це як питання або сумнів."
                 elseif sig.dominant == :shame
@@ -1480,6 +1501,7 @@ $(dominant_note)"""
                 end
 
                 a._last_user_flash = a.flash_count
+                a._last_user_time = time()
                 a.sig_layer.ticks_since_novelty = 0   # новий зовнішній стимул — голод скидається
                 r = experience!(a, stim; user_message = cmd, mem = mem)
                 dialog_to_belief_signal!(a.sbg, cmd, a.flash_count)

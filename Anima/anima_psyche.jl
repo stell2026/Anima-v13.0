@@ -1812,6 +1812,129 @@ function sr_from_json!(sr::ShadowRegistry, d::AbstractDict)
     end
 end
 
+# --- CuriosityObject ------------------------------------------------------
+# Конкретні об'єкти інтересу що живуть незалежно від присутності людини.
+# Виникають з pred_error що стабільно не закривається — те що Аніма не може передбачити.
+
+mutable struct CuriosityObject
+    id::String
+    label::String
+    pe_mean::Float64        # середній pred_error при активації
+    intensity::Float64      # зростає без розв'язання, decay при закритті
+    valence::Float64        # >0 цікаво, <0 тривожно-цікаво
+    activation_count::Int
+    last_active_flash::Int
+    resolved::Bool
+end
+
+mutable struct CuriosityRegistry
+    objects::Vector{CuriosityObject}
+    max_objects::Int
+end
+CuriosityRegistry() = CuriosityRegistry(CuriosityObject[], 12)
+
+function _curiosity_label(emotion::String, pe::Float64)::String
+    pe > 0.75 && return "невідоме у стані $(lowercase(emotion))"
+    pe > 0.55 && return "незрозуміле через $(lowercase(emotion))"
+    return "$(lowercase(emotion)) що не вкладається"
+end
+
+# Викликається з slow_tick при кожному флеші де є pred_error
+function update_curiosity!(
+    cr::CuriosityRegistry,
+    emotion_ctx::String,
+    pe::Float64,
+    valence::Float64,
+    flash::Int,
+)
+    pe < 0.32 && return  # недостатня невирішеність
+
+    # шукаємо існуючий об'єкт для цього emotion_ctx
+    idx = findfirst(o -> o.id == emotion_ctx && !o.resolved, cr.objects)
+    if idx !== nothing
+        obj = cr.objects[idx]
+        obj.pe_mean = obj.pe_mean * 0.85 + pe * 0.15
+        obj.intensity = clamp01(obj.intensity + pe * 0.06)
+        obj.valence = obj.valence * 0.9 + valence * 0.1
+        obj.activation_count += 1
+        obj.last_active_flash = flash
+    else
+        length(cr.objects) >= cr.max_objects && _prune_curiosity!(cr)
+        push!(cr.objects, CuriosityObject(
+            emotion_ctx,
+            _curiosity_label(emotion_ctx, pe),
+            pe,
+            clamp01(pe * 0.4),
+            valence,
+            1,
+            flash,
+            false,
+        ))
+    end
+end
+
+# decay + розв'язання об'єктів що давно не активувались
+function tick_curiosity!(cr::CuriosityRegistry, flash::Int)
+    for obj in cr.objects
+        obj.resolved && continue
+        gap = flash - obj.last_active_flash
+        if gap > 80
+            obj.intensity = clamp01(obj.intensity - 0.008)
+            obj.intensity < 0.05 && (obj.resolved = true)
+        end
+    end
+end
+
+# об'єкт "закрився" — pred_error впав (отримали відповідь)
+function resolve_curiosity!(cr::CuriosityRegistry, emotion_ctx::String, pe::Float64)
+    pe > 0.25 && return
+    idx = findfirst(o -> o.id == emotion_ctx && !o.resolved, cr.objects)
+    idx !== nothing && (cr.objects[idx].resolved = true)
+end
+
+function _prune_curiosity!(cr::CuriosityRegistry)
+    # видаляємо resolved або найслабші
+    filter!(o -> !o.resolved, cr.objects)
+    length(cr.objects) >= cr.max_objects &&
+        sort!(cr.objects, by = o -> o.intensity) |> x -> deleteat!(x, 1)
+end
+
+# топ активний об'єкт для промпту і ініціативи
+function top_curiosity(cr::CuriosityRegistry)::Union{CuriosityObject,Nothing}
+    active = filter(o -> !o.resolved && o.intensity > 0.15, cr.objects)
+    isempty(active) && return nothing
+    active[argmax(map(o -> o.intensity, active))]
+end
+
+function cr_to_json(cr::CuriosityRegistry)
+    Dict("objects" => [
+        Dict(
+            "id" => o.id,
+            "label" => o.label,
+            "pe_mean" => o.pe_mean,
+            "intensity" => o.intensity,
+            "valence" => o.valence,
+            "activation_count" => o.activation_count,
+            "last_active_flash" => o.last_active_flash,
+            "resolved" => o.resolved,
+        ) for o in cr.objects
+    ])
+end
+function cr_from_json!(cr::CuriosityRegistry, d::AbstractDict)
+    for od in get(d, "objects", Any[])
+        push!(cr.objects, CuriosityObject(
+            String(od["id"]),
+            String(od["label"]),
+            Float64(od["pe_mean"]),
+            Float64(od["intensity"]),
+            Float64(od["valence"]),
+            Int(od["activation_count"]),
+            Int(od["last_active_flash"]),
+            Bool(od["resolved"]),
+        ))
+    end
+end
+
 # --- Psyche Memory Persistence --------------------------------------------
 
 function psyche_save!(
@@ -1831,6 +1954,7 @@ function psyche_save!(
     ss::StructuralScars,
     sr::ShadowRegistry = ShadowRegistry(),
     id::InnerDialogue = InnerDialogue(),
+    cr::CuriosityRegistry = CuriosityRegistry(),
 )
     data=Dict(
         "narrative_gravity"=>ng_to_json(ng),
@@ -1848,6 +1972,7 @@ function psyche_save!(
         "structural_scars"=>scars_to_json(ss),
         "shadow_registry"=>sr_to_json(sr),
         "inner_dialogue"=>id_to_json(id),
+        "curiosity_registry"=>cr_to_json(cr),
     )
     open(filepath, "w") do f
         ;
@@ -1872,8 +1997,8 @@ function psyche_load!(
     ss::StructuralScars,
     sr::ShadowRegistry = ShadowRegistry(),
     id::InnerDialogue = InnerDialogue(),
+    cr::CuriosityRegistry = CuriosityRegistry(),
 )
-    isfile(filepath) || return
     try
         raw=JSON3.read(read(filepath, String))
         d=Dict{String,Any}(String(k)=>v for (k, v) in raw)
@@ -1897,6 +2022,7 @@ function psyche_load!(
         haskey(d, "structural_scars") && scars_from_json!(ss, d["structural_scars"])
         haskey(d, "shadow_registry") && sr_from_json!(sr, d["shadow_registry"])
         haskey(d, "inner_dialogue") && id_from_json!(id, d["inner_dialogue"])
+        haskey(d, "curiosity_registry") && cr_from_json!(cr, d["curiosity_registry"])
         println("  [PSYCHE] Завантажено.")
     catch e
         ;

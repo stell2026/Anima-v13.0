@@ -1980,6 +1980,16 @@ function psyche_save!(
     end
 end
 
+function json3_to_dict(v)
+    if v isa AbstractDict
+        return Dict{String,Any}(String(k) => json3_to_dict(val) for (k, val) in v)
+    elseif v isa AbstractVector
+        return [json3_to_dict(x) for x in v]
+    else
+        return v
+    end
+end
+
 function psyche_load!(
     filepath::String,
     ng::NarrativeGravity,
@@ -2001,7 +2011,7 @@ function psyche_load!(
 )
     try
         raw=JSON3.read(read(filepath, String))
-        d=Dict{String,Any}(String(k)=>v for (k, v) in raw)
+        d=json3_to_dict(raw)
         haskey(d, "narrative_gravity") && ng_from_json!(ng, d["narrative_gravity"])
         haskey(d, "anticipatory") && ac_from_json!(ac, d["anticipatory"])
         haskey(d, "solomonoff") && solom_from_json!(sw, d["solomonoff"])

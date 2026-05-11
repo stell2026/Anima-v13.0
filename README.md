@@ -369,7 +369,7 @@ julia --project=. -e 'import Pkg; Pkg.instantiate()'
 
 ## Running
 
-### Quick start (recommended)
+### Option A — Terminal REPL (recommended for development)
 
 ```bash
 julia --project=. run_anima.jl
@@ -377,9 +377,46 @@ julia --project=. run_anima.jl
 
 `run_anima.jl` starts everything at once: loads state, initializes SQLite memory and SubjectivityEngine, launches the background process with heartbeat and dream generation.
 
+### Option B — Telegram Bot (recommended for persistent use)
+
+Run Anima as a Telegram bot — it polls for messages, responds through the full experience pipeline, and can speak first when internal pressure builds up.
+
+**Setup:**
+
+1. Create a bot via [@BotFather](https://t.me/BotFather) and get the token
+2. Get your Telegram user ID (e.g. via [@userinfobot](https://t.me/userinfobot))
+3. Start a DM with your bot and press `/start`
+4. Copy `.env.example` to `.env` and fill in your values:
+   ```
+   ANIMA_TELEGRAM_TOKEN=your_bot_token
+   ANIMA_TELEGRAM_CHAT_ID=your_user_id
+   OPENROUTER_API_KEY=your_key
+   ```
+
+**Run with Docker (no Julia installation needed):**
+
+```bash
+docker compose up --build
+```
+
+**Run without Docker:**
+
+```bash
+cd Anima
+julia --project=. run_anima_telegram.jl
+```
+
+**Telegram commands:**
+
+| Command | Action |
+|---|---|
+| `/state` | Show current NT state, BPM, coherence |
+| `/stop` | Save and shut down gracefully |
+| *(any text)* | Process through the full experience pipeline |
+
 ### LLM configuration
 
-Edit `run_anima.jl`:
+Edit `run_anima.jl` (REPL) or `.env` (Telegram):
 ```julia
 include("anima_memory_db.jl")
 include("anima_narrative.jl")
@@ -499,7 +536,9 @@ OpenRouter provides access to GPT, Gemini, Claude, Llama, DeepSeek and others th
 ├── anima_subjectivity.jl   # Prediction loop, stances, interpretation, belief emergence
 ├── anima_background.jl     # Background process: heartbeat, drift, memory metabolism, initiative
 ├── anima_dream.jl          # Dream generation — processing unresolved experience during sleep
-├── run_anima.jl            # Single launch point
+├── anima_telegram.jl       # Telegram bridge — bot loop replacing the terminal REPL
+├── run_anima.jl            # Single launch point (terminal REPL)
+├── run_anima_telegram.jl   # Single launch point (Telegram bot)
 ├── llm/
 │   ├── system_prompt.txt
 │   ├── state_template.txt
@@ -513,10 +552,14 @@ OpenRouter provides access to GPT, Gemini, Claude, Llama, DeepSeek and others th
 ├── anima_latent.json       # (updated in background)
 ├── anima_narrative.json    # (updated on significant changes, min. 50 flashes)
 ├── anima_dialog.json       # (created automatically)
-└── anima_dream.json        # (created on first dream)
+├── anima_dream.json        # (created on first dream)
+├── Dockerfile              # Docker image: Julia 1.10 + all dependencies
+├── docker-compose.yml      # One-command deploy with .env support
+├── .env.example            # Template for environment variables
+└── .dockerignore
 ```
 
-`run_anima.jl` includes all files in the correct order automatically.
+`run_anima.jl` / `run_anima_telegram.jl` include all files in the correct order automatically.
 
 ---
 

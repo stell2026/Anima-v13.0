@@ -25,6 +25,9 @@ Thumbs.db
 # Логи
 *.log
 
+# Lock file (Telegram bridge)
+.telegram.lock
+
 # Тимчасові файли Julia
 *.jl.cov
 *.jl.*.cov

@@ -41,6 +41,7 @@ function tg_request(bot::TelegramBot, method::String, params::Dict = Dict(); tim
         msg = string(e)
         sanitized = replace(replace(msg, bot.token => "***"), bot.base_url => "***")
         @warn "[TG] Request failed: $method — $sanitized"
+        method == "getUpdates" && sleep(5.0)
         nothing
     end
 end
@@ -203,6 +204,7 @@ function telegram_loop!(
     pending_llm = nothing
     pending_user_msg = ""
     pending_is_initiative = false
+    processing_input = false
     llm_start_time = 0.0
     llm_timeout = 180.0
     shutdown_flag = Ref(false)
@@ -298,8 +300,8 @@ function telegram_loop!(
                 pending_is_initiative = false
             end
 
-            # Check initiative channel (only when no pending LLM call)
-            if isready(bg.initiative_channel) && isnothing(pending_llm)
+            # Check initiative channel (only when no pending LLM call and not processing input)
+            if isready(bg.initiative_channel) && isnothing(pending_llm) && !processing_input
                 sig = take!(bg.initiative_channel)
                 dominant_note = _initiative_note(sig)
                 _ini_sys = read_text_file(
@@ -361,6 +363,7 @@ $(dominant_note)"""
                 end
 
                 tg_send_typing(bot)
+                processing_input = true
 
                 stim, input_src, input_want = if use_input_llm
                     process_input(
@@ -484,6 +487,7 @@ $(dominant_note)"""
                 else
                     tg_send_message(bot, r.narrative)
                 end
+                processing_input = false
             end
 
             sleep(0.1)

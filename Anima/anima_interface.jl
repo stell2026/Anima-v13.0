@@ -1892,15 +1892,21 @@ function llm_async(
                 last_err = nothing
                 break
             catch e
-                @warn "[LLM] спроба $attempt помилка: $e"
-                last_err = e
+                _emsg = string(e)
+                !isempty(api_key) && (_emsg = replace(_emsg, api_key => "***"))
+                @warn "[LLM] спроба $attempt помилка: $_emsg"
+                last_err = _emsg
                 is_fatal =
                     e isa HTTP.Exceptions.StatusError && e.status in (400, 401, 403, 422)
                 (is_fatal || attempt == max_retries) && break
                 sleep(3.0 * attempt)
             end
         end
-        !isnothing(last_err) && put!(ch, "[LLM помилка ($(max_retries) спроб): $last_err]")
+        if !isnothing(last_err)
+            _le = string(last_err)
+            !isempty(api_key) && (_le = replace(_le, api_key => "***"))
+            put!(ch, "[LLM помилка ($(max_retries) спроб): $_le]")
+        end
     end
     ch
 end

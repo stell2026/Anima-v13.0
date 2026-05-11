@@ -1,0 +1,14 @@
+services:
+  anima:
+    build: .
+    container_name: anima-telegram
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - anima-state:/app/Anima/memory
+      - ./Anima/llm:/app/Anima/llm:ro
+    stop_grace_period: 10s
+
+volumes:
+  anima-state:

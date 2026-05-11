@@ -1,6 +1,6 @@
 using Pkg
 Pkg.activate(@__DIR__)
-Pkg.instantiate()
+isfile(joinpath(@__DIR__, "Manifest.toml")) || Pkg.instantiate()
 
 # Load .env file if present
 function load_dotenv!(path::String)
@@ -9,6 +9,7 @@ function load_dotenv!(path::String)
         stripped = strip(line)
         isempty(stripped) && continue
         startswith(stripped, '#') && continue
+        startswith(stripped, "export ") && (stripped = strip(stripped[8:end]))
         m = match(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", stripped)
         isnothing(m) && continue
         key = m.captures[1]

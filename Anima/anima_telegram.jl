@@ -29,17 +29,17 @@ function TelegramBot(token::String, chat_id::Int64; poll_timeout::Int = 30)
     )
 end
 
-function tg_request(bot::TelegramBot, method::String, params::Dict = Dict())
+function tg_request(bot::TelegramBot, method::String, params::Dict = Dict(); timeout::Int = 10)
     url = "$(bot.base_url)/$method"
     headers = ["Content-Type" => "application/json"]
     body = JSON3.write(params)
     try
-        resp = HTTP.post(url, headers, body; readtimeout = bot.poll_timeout + 10)
+        resp = HTTP.post(url, headers, body; readtimeout = timeout)
         data = JSON3.read(String(resp.body))
         data.ok ? data.result : nothing
     catch e
         msg = string(e)
-        sanitized = replace(msg, bot.token => "***")
+        sanitized = replace(replace(msg, bot.token => "***"), bot.base_url => "***")
         @warn "[TG] Request failed: $method — $sanitized"
         nothing
     end
@@ -62,10 +62,15 @@ function tg_get_updates(bot::TelegramBot)
         "allowed_updates" => ["message"],
     )
     bot.last_update_id[] > 0 && (params["offset"] = bot.last_update_id[] + 1)
-    tg_request(bot, "getUpdates", params)
+    tg_request(bot, "getUpdates", params; timeout = bot.poll_timeout + 10)
 end
 
+const _tg_msg_queue = String[]
+
 function tg_poll_message(bot::TelegramBot)::Union{String,Nothing}
+    if !isempty(_tg_msg_queue)
+        return popfirst!(_tg_msg_queue)
+    end
     updates = tg_get_updates(bot)
     isnothing(updates) && return nothing
     for upd in updates
@@ -78,12 +83,25 @@ function tg_poll_message(bot::TelegramBot)::Union{String,Nothing}
         Int64(msg.chat.id) == bot.chat_id || continue
         haskey(msg, :text) || continue
         raw = String(msg.text)
-        return length(raw) > MAX_MESSAGE_LENGTH ? first(raw, MAX_MESSAGE_LENGTH) : raw
+        txt = length(raw) > MAX_MESSAGE_LENGTH ? first(raw, MAX_MESSAGE_LENGTH) : raw
+        push!(_tg_msg_queue, txt)
     end
-    nothing
+    isempty(_tg_msg_queue) ? nothing : popfirst!(_tg_msg_queue)
 end
 
 # --- Lock file guard -------------------------------------------------------
+
+function _pid_alive(pid::Int)::Bool
+    try
+        @static if Sys.isunix()
+            return ccall(:kill, Cint, (Cint, Cint), pid, 0) == 0
+        else
+            return isdir("/proc/$pid")
+        end
+    catch
+        false
+    end
+end
 
 function acquire_lock!()
     if isfile(TG_LOCK_FILE)
@@ -92,7 +110,12 @@ function acquire_lock!()
         if !isempty(pid_str)
             pid = tryparse(Int, pid_str)
             if !isnothing(pid) && pid != getpid()
-                error("Another Anima Telegram instance may be running (PID $pid). Remove $TG_LOCK_FILE if stale.")
+                if _pid_alive(pid)
+                    error("Another Anima Telegram instance is running (PID $pid). Remove $TG_LOCK_FILE if stale.")
+                else
+                    @warn "[TG] Removing stale lock (PID $pid is dead)"
+                    rm(TG_LOCK_FILE)
+                end
             end
         end
     end
@@ -182,6 +205,29 @@ function telegram_loop!(
     pending_is_initiative = false
     llm_start_time = 0.0
     llm_timeout = 180.0
+    shutdown_flag = Ref(false)
+
+    function _cleanup!()
+        shutdown_flag[] && return
+        shutdown_flag[] = true
+        @info "[TG] Shutting down..."
+        if !isnothing(pending_llm)
+            try close(pending_llm) catch end
+        end
+        !bg.stop_signal[] && stop_background!(bg)
+        if !isnothing(mem)
+            try
+                cs = crisis_snapshot(a.crisis, a.flash_count)
+                close_memory!(mem; sbg = a.sbg, crisis_mode = cs.mode_name, flash = a.flash_count)
+            catch e
+                @warn "[MEM] close: $e"
+            end
+        end
+        save!(a; verbose = true)
+        release_lock!()
+    end
+
+    atexit(_cleanup!)
 
     try
         while true
@@ -274,10 +320,11 @@ $(sig.inner_voice)
 DRIVE: $(sig.dominant)$(get(sig, :is_impulse, false) ? " [внутрішній імпульс]" : "")$(sig.dominant == :novelty_hunger ? " [novelty=$(round(get(sig,:novelty_need,0.0),digits=2)), ticks=$(a.sig_layer.ticks_since_novelty)]" : "")
 $(dominant_note)"""
 
+                history_snap = lock(history_lock) do; copy(history); end
                 pending_llm = llm_async(
                     a,
                     initiative_prompt,
-                    history;
+                    history_snap;
                     api_url = llm_url,
                     model = input_llm_model,
                     api_key = input_llm_key,
@@ -427,8 +474,9 @@ $(dominant_note)"""
 
                 if use_llm
                     pending_user_msg = cmd
+                    history_snap = lock(history_lock) do; copy(history); end
                     pending_llm = llm_async(
-                        a, cmd, history;
+                        a, cmd, history_snap;
                         api_url = llm_url, model = llm_model,
                         api_key = llm_key, is_ollama = is_ollama, want = input_want,
                     )
@@ -441,20 +489,7 @@ $(dominant_note)"""
             sleep(0.1)
         end
     finally
-        if !isnothing(pending_llm)
-            try close(pending_llm) catch end
-        end
-        !bg.stop_signal[] && stop_background!(bg)
-        if !isnothing(mem)
-            try
-                cs = crisis_snapshot(a.crisis, a.flash_count)
-                close_memory!(mem; sbg = a.sbg, crisis_mode = cs.mode_name, flash = a.flash_count)
-            catch e
-                @warn "[MEM] close: $e"
-            end
-        end
-        save!(a; verbose = true)
-        release_lock!()
+        _cleanup!()
     end
 end
 

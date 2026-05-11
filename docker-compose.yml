@@ -6,9 +6,11 @@ services:
     env_file:
       - .env
     volumes:
-      - anima-state:/app/Anima/memory
+      - anima-memory:/app/Anima/memory
+      - anima-state:/app/Anima/state
       - ./Anima/llm:/app/Anima/llm:ro
     stop_grace_period: 10s
 
 volumes:
+  anima-memory:
   anima-state:

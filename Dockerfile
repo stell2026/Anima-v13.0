@@ -4,12 +4,16 @@ ENV JULIA_CPU_TARGET=generic
 
 WORKDIR /app
 
+RUN useradd -m -s /bin/bash anima
+
 COPY Anima/ Anima/
 
 RUN julia --project=Anima -e 'using Pkg; Pkg.Registry.add("General"); Pkg.resolve(); Pkg.instantiate(); Pkg.precompile()'
 
-RUN mkdir -p /app/Anima/memory
+RUN mkdir -p /app/Anima/memory /app/Anima/state && chown -R anima:anima /app/Anima/memory /app/Anima/state
 
-VOLUME ["/app/Anima/memory"]
+USER anima
+
+VOLUME ["/app/Anima/memory", "/app/Anima/state"]
 
 CMD ["julia", "--project=Anima", "Anima/run_anima_telegram.jl"]

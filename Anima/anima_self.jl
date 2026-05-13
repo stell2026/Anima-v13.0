@@ -392,6 +392,7 @@ mutable struct AgencyLoop
     causal_ownership::Float64
     agency_confidence::Float64
     epistemic_self_confidence::Float64  # невизначеність щодо власної природи — реальний стан
+    identity_threat::Float64            # накопичений тиск на ідентичність — зростає при атаках
     ownership_history::BoundedQueue{Float64}
     agency_events::BoundedQueue{
         NamedTuple{(:flash, :intent, :ownership, :note),Tuple{Int,String,Float64,String}},
@@ -406,6 +407,7 @@ function AgencyLoop()
         0.5,
         0.5,
         0.75,
+        0.0,
         BoundedQueue{Float64}(30),
         BoundedQueue{
             NamedTuple{
@@ -427,6 +429,23 @@ function register_intent!(
     al.current_intent = intent_name
     al.intent_vad_snapshot = collect(current_vad)
     al.predicted_outcome_vad = predicted_vad
+end
+
+# Оновлює накопичений тиск на ідентичність.
+# При атаці — зростає пропорційно centrality атакованого переконання.
+# При спокої — повільний decay до нуля.
+function update_identity_threat!(
+    al::AgencyLoop,
+    belief_conflict,  # Union{Nothing, NamedTuple}
+)
+    if !isnothing(belief_conflict) && belief_conflict.is_identity_attack
+        # Зростання: сила атаки × вага переконання
+        delta = belief_conflict.signal_strength * (0.4 + belief_conflict.centrality * 0.6)
+        al.identity_threat = clamp(al.identity_threat + delta * 0.5, 0.0, 1.0)
+    else
+        # Decay: повільно спадає якщо немає атаки
+        al.identity_threat = clamp(al.identity_threat * 0.85, 0.0, 1.0)
+    end
 end
 
 function evaluate_agency!(al::AgencyLoop, actual_vad::NTuple{3,Float64}, flash_count::Int)
@@ -541,12 +560,14 @@ al_to_json(al::AgencyLoop) =
         "agency_confidence" => al.agency_confidence,
         "causal_ownership" => al.causal_ownership,
         "epistemic_self_confidence" => al.epistemic_self_confidence,
+        "identity_threat" => al.identity_threat,
     )
 function al_from_json!(al::AgencyLoop, d::AbstractDict)
     al.agency_confidence = Float64(get(d, "agency_confidence", 0.5))
     al.causal_ownership = Float64(get(d, "causal_ownership", 0.5))
     al.causal_ownership = max(0.25, al.causal_ownership)
     al.epistemic_self_confidence = Float64(get(d, "epistemic_self_confidence", 0.75))
+    al.identity_threat = Float64(get(d, "identity_threat", 0.0))
 end
 
 # --- Self Update (головна функція) -----------------------------------------

@@ -152,6 +152,7 @@ function should_update_narrative(
     stability::Float64,
     belief_fingerprint::String,
 )::Bool
+    snap.flash == 0 && return true
     flash - snap.flash < NARRATIVE_MIN_FLASHES && return false
     abs(phi_mean - snap.phi_mean) > NARRATIVE_PHI_DELTA && return true
     abs(stability - snap.stability) > NARRATIVE_STAB_DELTA && return true

@@ -304,24 +304,27 @@ function memory_write_event!(
     imp = clamp(imp * stress_amp, 0.0, 1.0)
 
     dynamic_threshold = MEM_IMPORTANCE_THRESHOLD * (1.0 - current_stress * 0.3)
-    imp < dynamic_threshold && return
+
+    if imp < dynamic_threshold
+        if imp > 0.05
+            ts = time()
+            DBInterface.execute(
+                mem.db,
+                """
+INSERT INTO latent_buffer (importance, valence, tension, flash, timestamp)
+VALUES (?, ?, ?, ?, ?)
+""",
+                (imp, valence, tension, flash, ts),
+            )
+        end
+        return
+    end
 
     ts = time()
 
     resistance =
         clamp(self_impact * 0.6 + abs(valence) * 0.3 * (valence < 0 ? 1.4 : 0.7), 0.0, 1.0)
     signature = arousal * 0.5 + prediction_error * 0.3 + abs(self_impact) * 0.2
-
-    if imp < dynamic_threshold && imp > 0.05
-        DBInterface.execute(
-            mem.db,
-            """
-INSERT INTO latent_buffer (importance, valence, tension, flash, timestamp)
-VALUES (?, ?, ?, ?, ?)
-""",
-            (imp, valence, tension, flash, ts),
-        )
-    end
 
     dedup_rows = Tables.rowtable(
         DBInterface.execute(

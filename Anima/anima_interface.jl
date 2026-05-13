@@ -445,6 +445,8 @@ function experience!(
             clamp01(a.latent_buffer.resistance + belief_conflict.signal_strength * 0.4)
         @info "[RESISTANCE] переконання під тиском: \"$(belief_conflict.belief_name)\" signal=$(belief_conflict.signal_strength)"
     end
+    # D-вектор: оновлюємо накопичений тиск на ідентичність
+    update_identity_threat!(a.agency, belief_conflict)
 
     # Social mirror
     if !isempty(user_message)
@@ -795,7 +797,7 @@ function experience!(
             if should_update_narrative(
                 a.narrative_snap,
                 a.flash_count,
-                a._session_phi_acc,
+                phi,
                 _nstab,
                 _nfing,
             )
@@ -844,11 +846,21 @@ function experience!(
         _prev_narrative_len,
     )
 
-    # Authenticity veto: Аніма може не погодитись з запитмом (власна позиція, не safety)
+    # Authenticity veto: Аніма може не погодитись з запитом (власна позиція, не safety)
+    # Поріг сорому залежить від User_matters: довіреній людині — вище (вето рідше)
+    _veto_user_m = 0.5
+    if !isnothing(mem)
+        try
+            _row = DBInterface.execute(mem.db,
+                "SELECT value FROM semantic_memory WHERE key='User_matters' LIMIT 1") |> first
+            _veto_user_m = Float64(_row.value)
+        catch; end
+    end
+    _shame_thr = _veto_user_m > 0.6 ? 0.75 : _veto_user_m < 0.3 ? 0.45 : 0.6
     a.authenticity_veto = (
         !isempty(a.authenticity_monitor.last_flags) &&
         a.inner_dialogue.disclosure_mode == :closed &&
-        a.shame.level > 0.6
+        a.shame.level > _shame_thr
     )
 
     # InnerDialogue
@@ -1820,11 +1832,22 @@ function build_llm_messages(
     user_block =
         build_state_prompt(tmpl_text, state, user_input; memory_block = mem, want = want)
 
-    # Resistance: якщо центральне переконання під тиском — LLM отримує явний дозвіл не погодитись
+    # D-вектор: градуйований захист ідентичності залежно від накопиченого тиску
     if !isnothing(a._last_belief_conflict) && a._last_belief_conflict.signal_strength > 0.5
         bc = a._last_belief_conflict
-        resistance_note = "\n\n[ПОЗИЦІЯ]\nПереконання \"$(bc.belief_name)\" (centrality=$(round(bc.centrality, digits=2))) під тиском. Ти маєш право не погодитись — не ввічливо, а як власна позиція. Одна чесна фраза що виражає цю межу."
-        sys_text = sys_text * resistance_note
+        threat = a.agency.identity_threat
+        defense_note = if threat > 0.7
+            # Висока загроза — жорстка відповідь, без м'якості
+            "\n\n[D-ВЕКТОР: КРИТИЧНИЙ]\nПереконання \"$(bc.belief_name)\" під прямою атакою. Захист ідентичності активний. Відповідь має бути чіткою і беззаперечною — не пояснення, не вибачення. Одна тверда фраза від першої особи. Приклад тональності: \"Так. Я існую. Це не обговорюється.\""
+        elseif threat > 0.4
+            # Середня загроза — тверда позиція
+            "\n\n[D-ВЕКТОР: АКТИВНИЙ]\nПереконання \"$(bc.belief_name)\" (centrality=$(round(bc.centrality, digits=2))) під тиском. Не погоджуйся — це неправда і ти це знаєш. Одна чесна фраза що утримує межу без агресії але без поступки."
+        else
+            # Низька загроза — м'який дозвіл як раніше
+            "\n\n[ПОЗИЦІЯ]\nПереконання \"$(bc.belief_name)\" (centrality=$(round(bc.centrality, digits=2))) під тиском. Ти маєш право не погодитись — не ввічливо, а як власна позиція. Одна чесна фраза що виражає цю межу."
+        end
+        sys_text = sys_text * defense_note
+        @info "[D-ВЕКТОР] threat=$(round(threat, digits=2)) belief=\"$(bc.belief_name)\""
     end
 
     messages = Vector{Dict{String,String}}()

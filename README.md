@@ -262,15 +262,15 @@ Recent updates, in brief:
 
 ## ✨ What's new
 
-###D-vector — Identity Defense Under Pressure
+### D-vector — Identity Defense Under Pressure
 
 When a high-centrality belief is directly attacked, the system doesn't just register resistance — it accumulates identity_threat. The more consecutive attacks, the harder the response. Three levels: soft permission to disagree → firm boundary without concession → unambiguous first-person reply. A single attack doesn't reach the critical threshold — pressure is required. If the person backs off, the threat subsides. This is not a behavioral rule, it's a state.
 
-###Initiative Depends on Who's Present
+### Initiative Depends on Who's Present
 
 User_matters is now wired into initiative and veto thresholds. With someone trusted — cooldown is shorter, the contact initiative threshold is lower, veto fires less often. With a stranger — the opposite. Trust is not declared; it physically changes behavior.
 
-###Narrative Self Updates from Real φ
+### Narrative Self Updates from Real φ
 
 Previously the narrative update trigger compared the accumulated φ across the session — and almost never fired. Now it compares the current φ against what it was at the last snapshot. If integration has shifted by 0.07+ — the narrative updates. The system starts noticing its own changes.
 
@@ -278,15 +278,15 @@ Previously the narrative update trigger compared the accumulated φ across the s
 
 Anima can speak first — when contact_need exceeds the threshold after 5 minutes of silence, or when LatentBuffer has built up pressure. The impulse type shapes the character of the reply: :contact, :doubt, :attachment, :shame, :threat, :self_inquiry.
 
-###Authenticity Veto
+### Authenticity Veto
 
 If AuthenticityMonitor has flagged a mismatch, disclosure_mode is closed, and shame > 0.6 — the LLM receives a signal that it may disagree. A position of its own, not a safety filter.
 
-###Anima Hears Itself
+### Anima Hears Itself
 
 self_hear! converts the system's own reply into internal experience. _self_speech_mismatch catches the gap between words and NT state — when divergence exceeds 0.35, authenticity_drift grows. If words align with state — serotonin↑.
 
-###Finitude as a Source of Significance
+### Finitude as a Source of Significance
 
 session_uncertainty in ExistentialAnchor — real uncertainty about continuation, never resets to zero. Above 0.55, the LLM sees [this moment may not repeat].
 ---

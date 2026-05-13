@@ -163,7 +163,20 @@ function _maybe_self_initiate!(
     a.inner_dialogue.disclosure_mode == :closed && return
 
     now_t = time()
-    now_t - a._last_self_msg_time < SELF_INITIATE_COOLDOWN_SECS && return
+
+    # User_matters впливає на cooldown: знайома людина — коротший cooldown
+    user_m = 0.5
+    if !isnothing(mem)
+        try
+            row = DBInterface.execute(mem.db,
+                "SELECT value FROM semantic_memory WHERE key='User_matters' LIMIT 1") |> first
+            user_m = Float64(row.value)
+        catch; end
+    end
+    user_trust_factor = user_m > 0.6 ? 0.65 : user_m < 0.3 ? 1.4 : 1.0
+    effective_cooldown = SELF_INITIATE_COOLDOWN_SECS * user_trust_factor
+
+    now_t - a._last_self_msg_time < effective_cooldown && return
     now_t - a._last_user_time < SELF_INITIATE_GAP_SECS && return
 
     lb = a.latent_buffer
@@ -182,10 +195,11 @@ function _maybe_self_initiate!(
             lb_max >= SELF_INITIATE_LB_DOMINANT_THR
         )
 
-    # Шлях 2: contact/pressure — класичний накопичений тиск
+    # Шлях 2: contact/pressure — поріг нижчий для знайомої людини
+    effective_contact_thr = SELF_INITIATE_CONTACT_THR * user_trust_factor
     is_pressure =
         lb_pressure >= SELF_INITIATE_PRESSURE_THR ||
-        contact_drive >= SELF_INITIATE_CONTACT_THR
+        contact_drive >= effective_contact_thr
 
     # Шлях 3: ендогенний VFE-тиск — когнітивний голод без зовнішнього стимулу
     # Умова: потреба в новизні критична + достатньо часу без нової інформації
@@ -213,7 +227,7 @@ function _maybe_self_initiate!(
         else
             :impulse
         end
-    elseif contact_drive >= SELF_INITIATE_CONTACT_THR && contact_drive >= lb_pressure
+    elseif contact_drive >= effective_contact_thr && contact_drive >= lb_pressure
         :contact
     elseif is_resistance
         :resistance

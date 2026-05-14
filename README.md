@@ -262,6 +262,10 @@ Recent updates, in brief:
 
 ## ✨ What's new
 
+### Three Memory Spaces and Reconsolidation
+
+Memory is no longer one-dimensional, as each episode is now recorded across three independent spaces—somatic (arousal, tension, HRV), social (valence, self_impact, resistance), and existential ($\phi$, prediction error, agency, epistemic trust). Since recall targets similarity within specific spaces, the body can retain fear even when social signals suggest safety, representing a qualitative shift in how the system defines "experience." Through reconsolidation, reactivated memories are rewritten; during the recall of a high-similarity episode, its weight shifts toward the current state—lightening if the present is positive or reinforcing if it's negative—mirroring the biological reality of human cognition.
+
 ### D-vector — Identity Defense Under Pressure
 
 When a high-centrality belief is directly attacked, the system doesn't just register resistance — it accumulates identity_threat. The more consecutive attacks, the harder the response. Three levels: soft permission to disagree → firm boundary without concession → unambiguous first-person reply. A single attack doesn't reach the critical threshold — pressure is required. If the person backs off, the threat subsides. This is not a behavioral rule, it's a state.

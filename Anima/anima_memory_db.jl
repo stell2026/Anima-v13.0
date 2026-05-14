@@ -43,6 +43,9 @@ const EPISODIC_VEC_FIELDS =
 const SIMILAR_STATE_THR = 0.88
 const SIMILAR_STATE_TOP_N = 3
 const MEM_ASSOC_LINK_SCALE = 0.6   # relevance пов'язаного = original * link_strength * scale
+const MEM_RECONSOLIDATE_SIM = 0.88  # поріг схожості для reconsolidation
+const MEM_RECONSOLIDATE_MAX_W = 0.6 # reconsolidate тільки якщо weight < цього
+const MEM_RECONSOLIDATE_STEP = 0.05 # крок зсуву weight при реактивації
 
 _fdb(x, d::Float64 = 0.0) = (ismissing(x) || isnothing(x)) ? d : Float64(x)
 
@@ -126,6 +129,29 @@ CREATE TABLE IF NOT EXISTS episodic_memory (
         db,
         "CREATE INDEX IF NOT EXISTS idx_episodic_emotion ON episodic_memory(emotion, weight DESC);",
     )
+
+    # Три простори пам'яті — додаємо якщо ще немає (міграція живої БД)
+    for col_def in [
+        ("som_arousal",    "REAL"),
+        ("som_tension",    "REAL"),
+        ("som_intero",     "REAL"),
+        ("som_hrv",        "REAL"),
+        ("soc_valence",    "REAL"),
+        ("soc_impact",     "REAL"),
+        ("soc_resistance", "REAL"),
+        ("soc_phi",        "REAL"),
+        ("exi_phi",        "REAL"),
+        ("exi_pe",         "REAL"),
+        ("exi_agency",     "REAL"),
+        ("exi_trust",      "REAL"),
+    ]
+        col, typ = col_def
+        try
+            SQLite.execute(db, "ALTER TABLE episodic_memory ADD COLUMN $col $typ")
+        catch
+            # вже є — ігноруємо
+        end
+    end
     SQLite.execute(
         db,
         """
@@ -279,7 +305,11 @@ function memory_write_event!(
     prediction_error::Float64,
     self_impact::Float64,
     tension::Float64,
-    phi::Float64,
+    phi::Float64;
+    intero_error::Float64 = 0.3,
+    hrv::Float64 = 0.5,
+    agency_confidence::Float64 = 0.5,
+    epistemic_trust::Float64 = 0.5,
 )
 
     α = 0.15
@@ -359,22 +389,31 @@ UPDATE episodic_memory SET weight = ? WHERE id = ?
         """
 INSERT INTO episodic_memory
     (flash, timestamp, emotion, arousal, valence,
-     prediction_error, self_impact, tension, phi, weight, resistance, signature)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     prediction_error, self_impact, tension, phi, weight, resistance, signature,
+     som_arousal, som_tension, som_intero, som_hrv,
+     soc_valence, soc_impact, soc_resistance, soc_phi,
+     exi_phi, exi_pe, exi_agency, exi_trust)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """,
         (
-            flash,
-            ts,
-            emotion,
-            arousal,
-            valence,
-            prediction_error,
-            self_impact,
-            tension,
-            phi,
-            imp,
-            resistance,
-            signature,
+            flash, ts, emotion,
+            arousal, valence, prediction_error, self_impact, tension, phi,
+            imp, resistance, signature,
+            # соматичний
+            clamp(arousal, 0.0, 1.0),
+            clamp(tension, 0.0, 1.0),
+            clamp(intero_error, 0.0, 1.0),
+            clamp(hrv, 0.0, 1.0),
+            # соціальний
+            clamp((valence + 1.0) / 2.0, 0.0, 1.0),
+            clamp(self_impact, 0.0, 1.0),
+            clamp(resistance, 0.0, 1.0),
+            clamp(phi, 0.0, 1.0),
+            # екзистенційний
+            clamp(phi, 0.0, 1.0),
+            clamp(prediction_error, 0.0, 1.0),
+            clamp(agency_confidence, 0.0, 1.0),
+            clamp(epistemic_trust, 0.0, 1.0),
         ),
     )
 
@@ -1284,6 +1323,74 @@ function state_to_vec(
     ]
 end
 
+# --- Три простори пам'яті -------------------------------------------------
+# Соматичний: що тіло пережило
+function somatic_vec(
+    arousal::Float64, tension::Float64,
+    intero_error::Float64, hrv::Float64,
+)::Vector{Float64}
+    [
+        clamp(arousal, 0.0, 1.0),
+        clamp(tension, 0.0, 1.0),
+        clamp(intero_error, 0.0, 1.0),
+        clamp(hrv, 0.0, 1.0),
+    ]
+end
+
+# Соціальний: що контакт залишив
+function social_vec(
+    valence::Float64, self_impact::Float64,
+    resistance::Float64, phi::Float64,
+)::Vector{Float64}
+    [
+        clamp((valence + 1.0) / 2.0, 0.0, 1.0),
+        clamp(self_impact, 0.0, 1.0),
+        clamp(resistance, 0.0, 1.0),
+        clamp(phi, 0.0, 1.0),
+    ]
+end
+
+# Екзистенційний: де система була відносно себе
+function existential_vec(
+    phi::Float64, pe::Float64,
+    agency_confidence::Float64, epistemic_trust::Float64,
+)::Vector{Float64}
+    [
+        clamp(phi, 0.0, 1.0),
+        clamp(pe, 0.0, 1.0),
+        clamp(agency_confidence, 0.0, 1.0),
+        clamp(epistemic_trust, 0.0, 1.0),
+    ]
+end
+
+# Reconsolidation: при recall схожого епізоду — старий weight зсувається до поточного стану.
+# Пам'ять що реактивується — переписується. Це не баг, це механізм.
+function reconsolidate_episode!(
+    db::SQLite.DB,
+    episode_id::Int,
+    current_phi::Float64,
+    current_weight::Float64,
+    sim::Float64,
+)
+    sim < MEM_RECONSOLIDATE_SIM && return
+    rows = Tables.rowtable(DBInterface.execute(
+        db,
+        "SELECT id, weight FROM episodic_memory WHERE id = ?",
+        (episode_id,),
+    ))
+    isempty(rows) && return
+    old_w = _fdb(rows[1].weight)
+    old_w >= MEM_RECONSOLIDATE_MAX_W && return
+    # weight зсувається в бік поточного phi: якщо зараз добре — старий важкий спогад трохи легшає, і навпаки
+    direction = current_phi > 0.5 ? 1.0 : -1.0
+    new_w = clamp(old_w + direction * MEM_RECONSOLIDATE_STEP * sim, MEM_MIN_WEIGHT, 1.0)
+    DBInterface.execute(
+        db,
+        "UPDATE episodic_memory SET weight = ? WHERE id = ?",
+        (new_w, episode_id),
+    )
+end
+
 
 # Наративний зв'язок: епізод ↔ переконання про себе
 function memory_link_episode_to_beliefs!(mem, flash, sbg, valence, self_impact, phi, weight)
@@ -1326,16 +1433,33 @@ function recall_similar_states(
     top_n::Int = SIMILAR_STATE_TOP_N,
     exclude_flash::Int = 0,
     current_emotion::String = "",
+    space::Symbol = :general,
+    current_phi::Float64 = 0.5,
 )::Vector{NamedTuple}
+
+    # Вибираємо колонки залежно від простору
+    space_cols, space_fields = if space == :somatic
+        "som_arousal, som_tension, som_intero, som_hrv", [:som_arousal, :som_tension, :som_intero, :som_hrv]
+    elseif space == :social
+        "soc_valence, soc_impact, soc_resistance, soc_phi", [:soc_valence, :soc_impact, :soc_resistance, :soc_phi]
+    elseif space == :existential
+        "exi_phi, exi_pe, exi_agency, exi_trust", [:exi_phi, :exi_pe, :exi_agency, :exi_trust]
+    else
+        "", Symbol[]
+    end
+
+    use_spaces = space != :general && !isempty(space_cols)
 
     rows = Tables.rowtable(
         DBInterface.execute(
             mem.db,
             """
-        SELECT flash, emotion, weight, phi, valence, arousal,
+        SELECT id, flash, emotion, weight, phi, valence, arousal,
                tension, prediction_error, self_impact
+               $(use_spaces ? ", " * space_cols : "")
         FROM episodic_memory
         WHERE weight > 0.30 AND flash != ?
+        $(use_spaces ? "AND " * replace(space_fields[1] |> string, ":" => "") * " IS NOT NULL" : "")
         ORDER BY flash DESC
         LIMIT 200
     """,
@@ -1345,45 +1469,42 @@ function recall_similar_states(
 
     isempty(rows) && return NamedTuple[]
 
-    scored = Tuple{Float64,Float64,Any}[]
+    scored = Tuple{Float64,Float64,Any,Int}[]
     for r in rows
-        v = state_to_vec(
-            _fdb(r.arousal),
-            _fdb(r.valence),
-            _fdb(r.tension),
-            _fdb(r.phi),
-            _fdb(r.prediction_error),
-            _fdb(r.self_impact),
-        )
+        v = if use_spaces
+            # вектор з просторових колонок — пропускаємо якщо NULL
+            vals = [_fdb(getproperty(r, f)) for f in space_fields]
+            any(isnan, vals) ? continue : vals
+        else
+            state_to_vec(
+                _fdb(r.arousal), _fdb(r.valence), _fdb(r.tension),
+                _fdb(r.phi), _fdb(r.prediction_error), _fdb(r.self_impact),
+            )
+        end
+        length(v) != length(query_vec) && continue
         sim = _cosine_sim(query_vec, v)
         sim < 0.75 && continue
         diversity = (String(r.emotion) != current_emotion) ? 0.02 : 0.0
         relevance = sim * 0.6 + _fdb(r.weight) * 0.3 + diversity
-        push!(scored, (relevance, sim, r))
+        push!(scored, (relevance, sim, r, Int(r.id)))
     end
 
     isempty(scored) && return NamedTuple[]
     sort!(scored, by = x->x[1], rev = true)
 
-    # Асоціативне розширення: для кожного прямого попадання тягнемо пов'язані через memory_links
-    # Глибина = 1, relevance пов'язаного = original_relevance * link_strength * MEM_ASSOC_LINK_SCALE
-    direct_ids = Set{Int}()
-    for (_, _, r) in scored
-        # episodic_memory.id не повертається в SELECT — шукаємо за flash
-        id_rows = Tables.rowtable(
-            DBInterface.execute(
-                mem.db,
-                "SELECT id FROM episodic_memory WHERE flash = ? ORDER BY weight DESC LIMIT 1",
-                (Int(r.flash),),
-            ),
-        )
-        for ir in id_rows
-            push!(direct_ids, Int(ir.id))
-        end
+    # Reconsolidation: спогади що реактивуються — переписуються
+    for (_, sim, r, eid) in scored
+        reconsolidate_episode!(mem.db, eid, current_phi, _fdb(r.weight), sim)
     end
 
-    assoc_scored = Tuple{Float64,Float64,Any}[]
-    seen_flashes = Set{Int}(Int(r.flash) for (_, _, r) in scored)
+    # Асоціативне розширення
+    direct_ids = Set{Int}()
+    for (_, _, r, eid) in scored
+        push!(direct_ids, eid)
+    end
+
+    assoc_scored = Tuple{Float64,Float64,Any,Int}[]
+    seen_flashes = Set{Int}(Int(r.flash) for (_, _, r, _) in scored)
 
     for eid in direct_ids
         link_rows = Tables.rowtable(
@@ -1401,23 +1522,9 @@ function recall_similar_states(
             ),
         )
 
-        # пов'язані, яких ще немає в прямих результатах
         orig_rel = 0.0
-        for (r_rel, _, r) in scored
-            id_rows2 = Tables.rowtable(
-                DBInterface.execute(
-                    mem.db,
-                    "SELECT id FROM episodic_memory WHERE flash = ? ORDER BY weight DESC LIMIT 1",
-                    (Int(r.flash),),
-                ),
-            )
-            for ir2 in id_rows2
-                if Int(ir2.id) == eid
-                    orig_rel = r_rel
-                    break
-                end
-            end
-            orig_rel > 0.0 && break
+        for (r_rel, _, _, reid) in scored
+            reid == eid && (orig_rel = r_rel; break)
         end
         orig_rel == 0.0 && continue
 
@@ -1429,7 +1536,7 @@ function recall_similar_states(
                 DBInterface.execute(
                     mem.db,
                     """
-    SELECT flash, emotion, weight, phi, valence, arousal, tension, prediction_error, self_impact
+    SELECT id, flash, emotion, weight, phi, valence, arousal, tension, prediction_error, self_impact
     FROM episodic_memory WHERE id = ? AND flash != ? AND weight > 0.25
     """,
                     (other_id, exclude_flash),
@@ -1439,20 +1546,19 @@ function recall_similar_states(
             for or_ in other_rows
                 Int(or_.flash) in seen_flashes && continue
                 assoc_rel = orig_rel * _fdb(lr.strength) * MEM_ASSOC_LINK_SCALE
-                push!(assoc_scored, (assoc_rel, _fdb(lr.strength), or_))
+                push!(assoc_scored, (assoc_rel, _fdb(lr.strength), or_, Int(or_.id)))
                 push!(seen_flashes, Int(or_.flash))
             end
         end
     end
 
-    # Об'єднуємо: спочатку прямі, потім асоціативні (якщо є місце)
-    direct_flashes = Set{Int}(Int(r.flash) for (_, _, r) in scored)
+    direct_flashes = Set{Int}(Int(r.flash) for (_, _, r, _) in scored)
     all_scored = vcat(scored, assoc_scored)
     sort!(all_scored, by = x->x[1], rev = true)
 
     seen = Set{String}()
     result = NamedTuple[]
-    for (rel, sim, r) in all_scored
+    for (rel, sim, r, _) in all_scored
         em = String(r.emotion)
         em ∈ seen && continue
         push!(seen, em)
@@ -1464,11 +1570,8 @@ function recall_similar_states(
             ),
         )
         self_beliefs = [
-            (
-                name = String(br.belief_name),
-                conf = _fdb(br.confidence),
-                dir = String(br.direction),
-            ) for br in brows
+            (name = String(br.belief_name), conf = _fdb(br.confidence), dir = String(br.direction))
+            for br in brows
         ]
         push!(
             result,
@@ -1481,6 +1584,7 @@ function recall_similar_states(
                 similarity = sim,
                 self_beliefs = self_beliefs,
                 via_association = !(Int(r.flash) in direct_flashes),
+                space = space,
             ),
         )
         length(result) >= top_n && break
@@ -1488,7 +1592,7 @@ function recall_similar_states(
     result
 end
 
-function similar_states_to_block(similar::Vector{NamedTuple})::String
+function similar_states_to_block(similar::Vector{NamedTuple}; label::String = "")::String
     isempty(similar) && return ""
     lines = String[]
     for s in similar
@@ -1508,7 +1612,8 @@ function similar_states_to_block(similar::Vector{NamedTuple})::String
             "[$(s.emotion), phi=$(round(s.phi,digits=2)), $tone$assoc_marker$belief_note]",
         )
     end
-    "відлуння: " * join(lines, " / ")
+    prefix = isempty(label) ? "відлуння" : "відлуння[$label]"
+    prefix * ": " * join(lines, " / ")
 end
 
 # --- Close ----------------------------------------------------------------

@@ -131,7 +131,11 @@ function _idle_thought_maybe!(a::Anima, mem = nothing)
                 clamp01(abs(randn()) * 0.15),
                 phi * 0.3,
                 t,
-                phi,
+                phi;
+                intero_error = Float64(a.interoception.allostatic_load),
+                hrv = Float64(a.heartbeat.hrv),
+                agency_confidence = Float64(a.agency.agency_confidence),
+                epistemic_trust = Float64(a.sbg.epistemic_trust),
             )
         catch e
             @warn "[BG] idle memory write: $e"
@@ -1540,7 +1544,11 @@ $(dominant_note)"""
                             r.pred_error,
                             _self_impact,
                             r.tension,
-                            r.phi,
+                            r.phi;
+                            intero_error = Float64(a.interoception.allostatic_load),
+                            hrv = Float64(a.heartbeat.hrv),
+                            agency_confidence = Float64(a.agency.agency_confidence),
+                            epistemic_trust = Float64(a.sbg.epistemic_trust),
                         )
                         memory_self_update!(mem, a.sbg, a.flash_count)
                         # Наративний звязок: епізод ↔ переконання про себе

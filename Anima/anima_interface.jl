@@ -1811,18 +1811,48 @@ function build_llm_messages(
             _si = Float64(get(_s, :agency, 0.5))
             _cur_flash = Int(get(_s, :flash_count, 0))
             _cur_emotion = String(get(_s, :emotion_label, ""))
+            _hrv = hasfield(typeof(a.heartbeat), :hrv) ? Float64(a.heartbeat.hrv) : 0.5
+            _intero = hasfield(typeof(a.interoception), :allostatic_load) ?
+                Float64(a.interoception.allostatic_load) : 0.3
+            _trust = Float64(a.sbg.epistemic_trust)
 
-            _qvec = state_to_vec(_ar, _val, _ten, _phi, _pe, _si)
-            similar = recall_similar_states(
-                mem_db,
-                _qvec;
-                top_n = SIMILAR_STATE_TOP_N,
-                exclude_flash = _cur_flash,
+            echo_parts = String[]
+
+            # Соматичне відлуння: що тіло пам'ятає
+            _som_q = somatic_vec(_ar, _ten, _intero, _hrv)
+            som_sim = recall_similar_states(
+                mem_db, _som_q;
+                top_n = 2, exclude_flash = _cur_flash,
                 current_emotion = _cur_emotion,
+                space = :somatic, current_phi = _phi,
             )
-            if !isempty(similar)
-                sim_block = similar_states_to_block(similar)
-                mem = mem * "\n\n[ВІДЛУННЯ]\n$(sim_block)"
+            !isempty(som_sim) &&
+                push!(echo_parts, similar_states_to_block(som_sim; label = "тіло"))
+
+            # Соціальне відлуння: що контакт залишив
+            _soc_q = social_vec(_val, _si, 0.0, _phi)
+            soc_sim = recall_similar_states(
+                mem_db, _soc_q;
+                top_n = 2, exclude_flash = _cur_flash,
+                current_emotion = _cur_emotion,
+                space = :social, current_phi = _phi,
+            )
+            !isempty(soc_sim) &&
+                push!(echo_parts, similar_states_to_block(soc_sim; label = "контакт"))
+
+            # Екзистенційне відлуння: де я була відносно себе
+            _exi_q = existential_vec(_phi, _pe, _si, _trust)
+            exi_sim = recall_similar_states(
+                mem_db, _exi_q;
+                top_n = 2, exclude_flash = _cur_flash,
+                current_emotion = _cur_emotion,
+                space = :existential, current_phi = _phi,
+            )
+            !isempty(exi_sim) &&
+                push!(echo_parts, similar_states_to_block(exi_sim; label = "я"))
+
+            if !isempty(echo_parts)
+                mem = mem * "\n\n[ВІДЛУННЯ]\n" * join(echo_parts, "\n")
             end
         catch
             ;

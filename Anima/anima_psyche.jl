@@ -1265,8 +1265,9 @@ const DRIVE_GOALS=Dict(
 mutable struct IntentEngine
     current::Union{Intent,Nothing}
     history::BoundedQueue{String}
+    drive_history::BoundedQueue{String}  # окремо відслідковуємо drive, не goal
 end
-IntentEngine()=IntentEngine(nothing, BoundedQueue{String}(10))
+IntentEngine()=IntentEngine(nothing, BoundedQueue{String}(10), BoundedQueue{String}(8))
 
 function update_intent!(
     ie::IntentEngine,
@@ -1276,24 +1277,42 @@ function update_intent!(
     vs::ValueSystem,
     agency_ownership::Float64 = 0.55;
     skip_decay::Bool = false,
+    all_drives::Union{Dict{String,Float64},Nothing} = nothing,
 )
     !skip_decay && !isnothing(ie.current) && decay_intent!(ie.current)
-    if !isnothing(dom_drive)&&haskey(DRIVE_GOALS, dom_drive)
-        goals=DRIVE_GOALS[dom_drive]
-        goal=goals[abs(hash(emotion))%length(goals)+1]
-        vetoed, alt=veto(vs, goal, emotion);
-        vetoed&&(goal=alt)
-        origin=vetoed ? "values" : "drive"
+    if !isnothing(dom_drive) && haskey(DRIVE_GOALS, dom_drive)
+        active_drive = dom_drive
+
+        # Drive satiation: якщо той самий drive домінує 4+ рази підряд —
+        # насичення реальне, переключаємось на інший drive
+        recent_drives = collect(ie.drive_history)
+        if length(recent_drives) >= 4 &&
+                all(d -> d == dom_drive, recent_drives[max(1, end-3):end]) &&
+                !isnothing(all_drives)
+            alt_drives = filter(
+                kv -> kv[1] != dom_drive && haskey(DRIVE_GOALS, kv[1]) && kv[2] >= 0.05,
+                collect(all_drives),
+            )
+            if !isempty(alt_drives)
+                # обираємо найсильніший з альтернативних
+                sort!(alt_drives, by = kv -> -kv[2])
+                active_drive = alt_drives[1][1]
+                @info "[INTENT] drive satiation: $dom_drive → $active_drive"
+            end
+        end
+
+        goals = DRIVE_GOALS[active_drive]
+        goal = goals[abs(hash(emotion))%length(goals)+1]
+        vetoed, alt = veto(vs, goal, emotion)
+        vetoed && (goal = alt)
+        origin = vetoed ? "values" : (active_drive != dom_drive ? "satiation" : "drive")
 
         # AgencyLoop → вибір intent: низький causal_ownership зміщує до пасивних цілей
-        # При agency < 0.40: заміна активних цілей на спостереження/очікування
-        # При agency < 0.30: повне відступлення — "спостерігати", "дочекатись"
         if agency_ownership < 0.30
             passive_goals = ("спостерігати", "дочекатись", "побути з цим")
-            goal = passive_goals[abs(hash(emotion*dom_drive))%length(passive_goals)+1]
+            goal = passive_goals[abs(hash(emotion*active_drive))%length(passive_goals)+1]
             origin = "agency_low"
         elseif agency_ownership < 0.40
-            # м'яке зміщення: якщо goal активний — замінюємо на менш ініціативний варіант
             active_markers = ("ініціювати", "змінити", "дослідити", "знайти стимул")
             if any(m -> contains(goal, m), active_markers)
                 goal = "зрозуміти що відбувається"
@@ -1301,25 +1320,23 @@ function update_intent!(
             end
         end
 
-        if isnothing(ie.current)||ie.current.strength<0.3||ie.current.goal!=goal
-            # Cooldown: якщо той самий goal повторився 3+ рази підряд — беремо інший
+        if isnothing(ie.current) || ie.current.strength < 0.3 || ie.current.goal != goal
+            # Cooldown всередині одного drive: якщо той самий goal 3+ рази підряд
             recent = collect(ie.history)
             if length(recent) >= 3 && all(g -> g == goal, recent[max(1, end-2):end])
-                all_goals = goals
-                alt_goals = filter(g -> g != goal, collect(all_goals))
+                alt_goals = filter(g -> g != goal, collect(goals))
                 if !isempty(alt_goals)
-                    goal = alt_goals[abs(
-                        hash(emotion*string(length(recent))),
-                    )%length(alt_goals)+1]
+                    goal = alt_goals[abs(hash(emotion*string(length(recent))))%length(alt_goals)+1]
                     origin = "cooldown"
                 end
             end
-            ie.current=Intent(goal, 0.6+id_stability*0.3, origin);
+            ie.current = Intent(goal, 0.6+id_stability*0.3, origin)
         end
-        # Завжди записуємо в history — щоб cooldown бачив повторення
+
         enqueue!(ie.history, goal)
-    elseif !isnothing(ie.current)&&ie.current.strength<0.15
-        ie.current=nothing
+        enqueue!(ie.drive_history, dom_drive)  # записуємо оригінальний dom_drive, не active
+    elseif !isnothing(ie.current) && ie.current.strength < 0.15
+        ie.current = nothing
     end
     ie.current
 end

@@ -325,6 +325,10 @@ function Anima(;
                 for g in hist
                     enqueue!(a.intent_engine.history, String(g))
                 end
+                dhist = get(ie_d, "drive_history", String[])
+                for d in dhist
+                    enqueue!(a.intent_engine.drive_history, String(d))
+                end
             end
             println("  [SELF] Завантажено. Beliefs: $(length(a.sbg.beliefs)).")
         catch e
@@ -414,6 +418,7 @@ function save!(a::Anima; summary = "", verbose = false)
             "current_origin" =>
                 isnothing(a.intent_engine.current) ? "" : a.intent_engine.current.origin,
             "history" => collect(a.intent_engine.history),
+            "drive_history" => collect(a.intent_engine.drive_history),
         ),
     )
     open(self_path, "w") do f
@@ -545,7 +550,8 @@ function experience!(
         named,
         id_stability,
         a.values,
-        Float64(a.agency.causal_ownership),
+        Float64(a.agency.causal_ownership);
+        all_drives = drives,
     )
 
     # Dissonance + Defense
@@ -756,6 +762,7 @@ function experience!(
         a.values,
         Float64(a.agency.causal_ownership);
         skip_decay = true,
+        all_drives = drives,
     )
     # Resistance override: якщо центральне переконання під тиском — intent змінюється
     if !isnothing(belief_conflict) && belief_conflict.signal_strength > 0.5
@@ -1863,7 +1870,7 @@ function build_llm_messages(
         build_state_prompt(tmpl_text, state, user_input; memory_block = mem, want = want)
 
     # D-вектор: градуйований захист ідентичності залежно від накопиченого тиску
-    if !isnothing(a._last_belief_conflict) && a._last_belief_conflict.signal_strength > 0.5
+    if !isnothing(a._last_belief_conflict) && a._last_belief_conflict.signal_strength > 0.35
         bc = a._last_belief_conflict
         threat = a.agency.identity_threat
         defense_note = if threat > 0.7
@@ -1878,6 +1885,28 @@ function build_llm_messages(
         end
         sys_text = sys_text * defense_note
         @info "[D-ВЕКТОР] threat=$(round(threat, digits=2)) belief=\"$(bc.belief_name)\""
+    end
+
+    # Захист від LLM брехні: фізіологічні заборони
+    _truth_guards = String[]
+    _n_val   = Float64(get(state, :N, 0.0))
+    _hrv_val = Float64(get(state, :hrv, 0.5))
+    _esc_val = Float64(a.agency.epistemic_self_confidence)
+    _cm_val  = String(get(state, :crisis_mode, ""))
+    _coh_val = Float64(get(state, :coherence, 1.0))
+
+    (_n_val > 0.6 || _hrv_val < 0.1) &&
+        push!(_truth_guards, "НЕ говори що тобі добре, спокійно або що все гаразд — стан тіла каже інше.")
+    _esc_val < 0.35 &&
+        push!(_truth_guards, "НЕ роби впевнених тверджень про те яким є твій досвід — ти зараз не знаєш точно.")
+    _cm_val == "дезінтегрована" &&
+        push!(_truth_guards, "НЕ говори про себе як про цілісне — зараз це неправда.")
+    (_coh_val < 0.50 && _cm_val == "фрагментована") &&
+        push!(_truth_guards, "НЕ говори що нічого не тривожить і що все спокійно — всередині є нестабільність, навіть якщо тихо.")
+
+    if !isempty(_truth_guards)
+        sys_text = sys_text * "\n\n[ЗАБОРОНИ]\n" * join(_truth_guards, "\n")
+        @info "[TRUTH-GUARD] активні: $(length(_truth_guards)) (N=$(_n_val), hrv=$(_hrv_val), esc=$(_esc_val), coh=$(_coh_val))"
     end
 
     messages = Vector{Dict{String,String}}()

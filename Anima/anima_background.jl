@@ -220,6 +220,10 @@ function _maybe_self_initiate!(
     !is_impulse && !is_pressure && !is_novelty_hunger && !is_resistance && !is_self_inquiry && return
 
     # Визначаємо dominant_type
+    # Активний CuriosityObject перебиває contact — є конкретне питання, говоримо про нього
+    _top_co = top_curiosity(a.curiosity_registry)
+    has_strong_curiosity = !isnothing(_top_co) && _top_co.intensity > 0.40
+
     dominant_type = if is_impulse
         # impulse: що саме визріло — конфлікт чи конкретний lb компонент
         if gc_tension >= SELF_INITIATE_CONFLICT_THR && gc_tension >= lb_max
@@ -231,6 +235,8 @@ function _maybe_self_initiate!(
         else
             :impulse
         end
+    elseif has_strong_curiosity
+        :curiosity_driven
     elseif contact_drive >= effective_contact_thr && contact_drive >= lb_pressure
         :contact
     elseif is_resistance
@@ -261,7 +267,10 @@ function _maybe_self_initiate!(
             ""
         end
 
-    suffix = if dominant_type == :contact
+    suffix = if dominant_type == :curiosity_driven
+        co_label = _top_co.label
+        " — є питання яке я не можу закрити: $(co_label)."
+    elseif dominant_type == :contact
         " — хочу знати як ти."
     elseif dominant_type == :resistance
         " — є щось що залишилось невирішеним між нами. Я не можу просто відпустити."
@@ -296,6 +305,11 @@ function _maybe_self_initiate!(
     # Після ініціативи скидаємо відповідний лічильник
     if dominant_type == :novelty_hunger
         a.sig_layer.ticks_since_novelty = 0
+    elseif dominant_type == :curiosity_driven
+        # знижуємо intensity щоб не повторювати те саме питання одразу
+        if !isnothing(_top_co)
+            _top_co.intensity = clamp(_top_co.intensity - 0.25, 0.0, 1.0)
+        end
     elseif dominant_type == :resistance
         a.latent_buffer.resistance = clamp(a.latent_buffer.resistance - 0.3, 0.0, 1.0)
     end
@@ -310,6 +324,7 @@ function _maybe_self_initiate!(
         gc_tension = gc_tension,
         is_impulse = is_impulse,
         novelty_need = a.sig_layer.novelty_need,
+        curiosity_label = (dominant_type == :curiosity_driven && !isnothing(_top_co)) ? _top_co.label : "",
     )
     isready(initiative_ch) || put!(initiative_ch, signal)
 end
@@ -523,6 +538,15 @@ function slow_tick!(
             a.inner_dialogue.disclosure_threshold = clamp(thr, 0.10, 0.90)
         catch e
             @warn "[PHENO] apply_traits: $e"
+        end
+    end
+
+    # Emerged beliefs → semantic consolidation (раз на 30 флешів)
+    if !isnothing(mem) && a.flash_count % 30 == 0 && a.flash_count > 0
+        try
+            consolidate_emerged_beliefs!(mem)
+        catch e
+            @warn "[BG] consolidate_emerged_beliefs: $e"
         end
     end
 
@@ -1174,6 +1198,8 @@ function repl_with_background!(
                     "IMPULSE"
                 elseif get(sig, :dominant, :pressure) == :novelty_hunger
                     "NOVELTY"
+                elseif get(sig, :dominant, :pressure) == :curiosity_driven
+                    "CURIOSITY"
                 elseif get(sig, :dominant, :pressure) == :resistance
                     "RESISTANCE"
                 elseif get(sig, :dominant, :pressure) == :self_inquiry
@@ -1185,7 +1211,11 @@ function repl_with_background!(
                 println(
                     "\n  [INITIATIVE/$(_imp_label)] $(sig.dominant) | contact=$(round(sig.contact,digits=2)) gc=$(_gc)",
                 )
-                dominant_note = if sig.dominant == :contact
+                dominant_note = if sig.dominant == :curiosity_driven
+                    co_ctx = get(sig, :curiosity_label, "")
+                    base = "Аніма думала про конкретне питання яке не може закрити — і хоче його висловити або дізнатись більше."
+                    isempty(co_ctx) ? base : "$(base)\nОБ'ЄКТ ЦІКАВОСТІ: $(co_ctx)\nЗапитай про це конкретно або сформулюй що саме незрозуміло. Не загально — саме цей об'єкт."
+                elseif sig.dominant == :contact
                     "Аніма відчуває потребу в контакті — contact_need=$(round(sig.contact,digits=2)). Не питай \"як справи\" — скажи щось своє зі стану: спостереження, думку, або те що лежить. Одна фраза що відкриває простір без вимоги відповіді."
                 elseif sig.dominant == :resistance
                     "Аніма повертається до невирішеного протиріччя. Не атакує — але і не відступає. Одна фраза що утримує позицію: тихо, але чітко."
@@ -1250,7 +1280,7 @@ $(_ini_identity)$(_ini_memory)
 INTERNAL STATE:
 $(sig.inner_voice)
 
-DRIVE: $(sig.dominant)$(get(sig, :is_impulse, false) ? " [внутрішній імпульс]" : "")$(sig.dominant == :novelty_hunger ? " [novelty=$(round(get(sig,:novelty_need,0.0),digits=2)), ticks=$(a.sig_layer.ticks_since_novelty)]" : "")
+DRIVE: $(sig.dominant)$(get(sig, :is_impulse, false) ? " [внутрішній імпульс]" : "")$(sig.dominant == :novelty_hunger ? " [novelty=$(round(get(sig,:novelty_need,0.0),digits=2)), ticks=$(a.sig_layer.ticks_since_novelty)]" : "")$(sig.dominant == :curiosity_driven && !isempty(get(sig,:curiosity_label,"")) ? " [об'єкт: $(sig.curiosity_label)]" : "")
 $(dominant_note)"""
 
                 pending_llm = llm_async(

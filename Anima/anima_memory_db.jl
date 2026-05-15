@@ -1616,6 +1616,71 @@ function similar_states_to_block(similar::Vector{NamedTuple}; label::String = ""
     prefix * ": " * join(lines, " / ")
 end
 
+# --- Emerged belief consolidation -----------------------------------------
+
+# Групує emerged_beliefs за типом, записує узагальнення в semantic_memory.
+# Поріг: мінімум MIN_EMERGED_FOR_TENDENCY записів з середнім strength > TENDENCY_STRENGTH_THRESHOLD.
+# Архів зберігається — пишемо тільки шар знання поверх.
+const MIN_EMERGED_FOR_TENDENCY  = 15
+const TENDENCY_STRENGTH_THRESHOLD = 0.50
+
+function consolidate_emerged_beliefs!(mem::MemoryDB)
+    try
+        rows = DBInterface.execute(
+            mem.db,
+            "SELECT belief_type, valence_bias, strength FROM emerged_beliefs WHERE strength > 0.35",
+        )
+        # Накопичуємо по типах
+        counts   = Dict{String,Int}()
+        str_sums = Dict{String,Float64}()
+        val_sums = Dict{String,Float64}()
+        for r in rows
+            t = String(r.belief_type)
+            counts[t]   = get(counts,   t, 0)   + 1
+            str_sums[t] = get(str_sums, t, 0.0) + Float64(r.strength)
+            val_sums[t] = get(val_sums, t, 0.0) + Float64(r.valence_bias)
+        end
+
+        now_t = round(Int, time())
+        consolidated = 0
+        for (t, n) in counts
+            n < MIN_EMERGED_FOR_TENDENCY && continue
+            avg_str = str_sums[t] / n
+            avg_str < TENDENCY_STRENGTH_THRESHOLD && continue
+
+            # Ключ: tendency_{тип без спецсимволів}
+            safe_key = "tendency_" * replace(t, r"[^a-zа-яёіїєA-ZА-ЯЁІЇЄ0-9_]" => "_")
+            # Плавний рух до нового значення — не перезаписуємо різко
+            existing = try
+                r2 = first(DBInterface.execute(
+                    mem.db,
+                    "SELECT value FROM semantic_memory WHERE key=? LIMIT 1",
+                    (safe_key,),
+                ))
+                Float64(r2.value)
+            catch
+                -1.0  # не існує
+            end
+            new_val = if existing < 0.0
+                avg_str
+            else
+                existing * 0.7 + avg_str * 0.3
+            end
+            SQLite.execute(
+                mem.db,
+                "INSERT INTO semantic_memory(key,value,source,updated) VALUES(?,?,?,?)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated=excluded.updated",
+                (safe_key, round(new_val, digits = 4), "emerged_consolidation", now_t),
+            )
+            consolidated += 1
+        end
+        consolidated > 0 &&
+            @info "[CONSOLIDATE] emerged→semantic: $consolidated тенденцій оновлено"
+    catch e
+        @warn "[CONSOLIDATE] consolidate_emerged_beliefs!: $e"
+    end
+end
+
 # --- Close ----------------------------------------------------------------
 
 function close_memory!(
